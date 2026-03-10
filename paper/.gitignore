@@ -1,0 +1,25 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+
+# Generated PDFs (rebuild from source)
+paper.pdf
+
+# Mermaid generated diagrams
+diagram-sequence.pdf
+
+# Editor and IDE files
+*.swp
+*~

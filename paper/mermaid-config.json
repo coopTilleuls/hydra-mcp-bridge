@@ -1,0 +1,21 @@
+{
+  "sequence": {
+    "mirrorActors": false,
+    "messageMargin": 12,
+    "boxMargin": 5,
+    "noteMargin": 10,
+    "actorMargin": 20,
+    "width": 160,
+    "height": 35,
+    "useMaxWidth": false,
+    "noteFontSize": "11px",
+    "wrap": true
+  },
+  "themeCSS": ".note rect { rx: 4; ry: 4; stroke-width: 1; } .note { padding: 15px; }",
+  "themeVariables": {
+    "fontSize": "12px",
+    "noteBkgColor": "#f5f5f5",
+    "noteBorderColor": "#cccccc",
+    "noteTextColor": "#333333"
+  }
+}

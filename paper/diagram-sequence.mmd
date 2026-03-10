@@ -1,0 +1,32 @@
+sequenceDiagram
+    participant Agent as AI Agent
+    participant Gateway as MCP Gateway
+    participant API as Hydra API
+
+    rect rgb(235, 245, 255)
+    Note over Agent,API: Phase 1 — Entrypoint (Awareness)
+    Agent->>Gateway: read_hydra_resource({uri: "/"})
+    Gateway->>API: GET /
+    API-->>Gateway: Entrypoint + Link: docs.jsonld
+    Gateway-->>Agent: Collection links (/books, /reviews, …)
+    end
+
+    rect rgb(235, 255, 235)
+    Note over Agent,API: Phase 2 — Collection Visit (Tool Discovery)
+    Agent->>Gateway: read_hydra_resource({uri: "/books"})
+    Gateway->>API: GET /books
+    API-->>Gateway: hydra:Collection
+    Gateway->>API: GET /docs.jsonld
+    API-->>Gateway: hydra:ApiDocumentation
+    Note over Gateway: Extract operations (names from hydra:title)
+    Gateway-->>Agent: notifications/tools/list_changed
+    Gateway-->>Agent: Collection JSON-LD
+    end
+
+    rect rgb(245, 235, 255)
+    Note over Agent,API: Dynamic Tool Execution
+    Agent->>Gateway: post_book({title: "1984", author: "Orwell"})
+    Gateway->>API: POST /books
+    API-->>Gateway: 201 Created
+    Gateway-->>Agent: Created resource JSON-LD
+    end
