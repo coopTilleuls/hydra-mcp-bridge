@@ -1,0 +1,21 @@
+# see https://symfony.com/doc/current/reference/configuration/framework.html
+framework:
+    secret: '%env(APP_SECRET)%'
+
+    # Note that the session will be started ONLY if you read or write from it.
+    session: true
+
+    http_client:
+        scoped_clients:
+            hydra.client:
+                base_uri: '%env(HYDRA_API_BASE_URL)%'
+                verify_peer: false
+                verify_host: false
+                headers:
+                    Accept: 'application/ld+json'
+
+when@test:
+    framework:
+        test: true
+        session:
+            storage_factory_id: session.storage.factory.mock_file
