@@ -14,12 +14,6 @@
 *.snm
 *.vrb
 
-# Generated PDFs (rebuild from source)
-paper.pdf
-
-# Mermaid generated diagrams
-diagram-sequence.pdf
-
 # Editor and IDE files
 *.swp
 *~
