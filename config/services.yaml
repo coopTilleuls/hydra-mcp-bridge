@@ -53,6 +53,10 @@ services:
             $hydraClient: '@hydra.client'
             $logger: '@logger'
 
+    App\Eval\McpEvalLogger:
+        arguments:
+            $evalDir: '%kernel.project_dir%/var/eval'
+
     App\State\ReadHydraResourceProcessor:
         arguments:
             $hydraClient: '@hydra.client'
