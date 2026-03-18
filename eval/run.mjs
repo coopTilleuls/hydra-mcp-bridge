@@ -3,16 +3,17 @@
 /**
  * Eval Benchmark Runner
  *
- * Runs evaluation tasks from EVAL_PROTOCOL.md against LLM CLI tools,
+ * Runs evaluation tasks against OpenCode CLI with multiple models (via GitHub Copilot),
  * collecting structured results + gateway NDJSON logs.
  *
  * Usage:
- *   node eval/run.mjs                          # All tasks, all CLIs, k=1
- *   node eval/run.mjs --cli claude              # Single CLI
- *   node eval/run.mjs --task T1.1               # Single task
- *   node eval/run.mjs --tier 1                  # Single tier
- *   node eval/run.mjs --runs 5                  # k=5 repetitions
- *   node eval/run.mjs --timeout 180000          # 3min timeout per task
+ *   node eval/run.mjs                                              # All tasks, all models, k=1
+ *   node eval/run.mjs --model=github-copilot/gpt-5-mini           # Single model
+ *   node eval/run.mjs --task T1.1              # Single task
+ *   node eval/run.mjs --tier 1                 # Single tier
+ *   node eval/run.mjs --runs 5                 # k=5 repetitions
+ *   node eval/run.mjs --timeout 180000         # 3min timeout per task
+ *   node eval/run.mjs --condition B            # OpenAPI static condition
  */
 
 import { execFileSync } from 'node:child_process';
@@ -22,16 +23,18 @@ import { join } from 'node:path';
 import { TASKS } from './tasks.mjs';
 import {
   PROJECT_ROOT, DEMO_API_DIR, EVAL_LOG_DIR, RESULTS_DIR,
-  MCP_CACHE_DIR, CLIENT_SLUGS,
-  TEST_HYDRA_DIR, TEST_OPENAPI_DIR,
+  MCP_CACHE_DIR, MODELS, GATEWAY_CLIENT_SLUG,
+  TEST_HYDRA_DIR, TEST_OPENAPI_DIR, modelSlug,
+  SYSTEM_PROMPT_PATH,
 } from './config.mjs';
+import { runTask } from './adapters/opencode.mjs';
 
 // ─── CLI argument parsing ───────────────────────────────────────────────────
 
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
-    cli: null,      // null = all
+    model: null,    // null = all models
     task: null,     // null = all
     tier: null,     // null = all
     runs: 1,
@@ -42,16 +45,22 @@ function parseArgs() {
   };
 
   for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case '--cli': opts.cli = args[++i]; break;
-      case '--task': opts.task = args[++i]; break;
-      case '--tier': opts.tier = parseInt(args[++i], 10); break;
-      case '--runs': opts.runs = parseInt(args[++i], 10); break;
-      case '--timeout': opts.timeoutMs = parseInt(args[++i], 10); break;
+    // Support --key=value syntax
+    let key = args[i], val;
+    if (key.includes('=')) {
+      [key, ...val] = key.split('=');
+      val = val.join('='); // rejoin in case value contains =
+    }
+    switch (key) {
+      case '--model': opts.model = val ?? args[++i]; break;
+      case '--task': opts.task = val ?? args[++i]; break;
+      case '--tier': opts.tier = parseInt(val ?? args[++i], 10); break;
+      case '--runs': opts.runs = parseInt(val ?? args[++i], 10); break;
+      case '--timeout': opts.timeoutMs = parseInt(val ?? args[++i], 10); break;
       case '--dry-run': opts.dryRun = true; break;
       case '--skip-reset': opts.skipReset = true; break;
       case '--condition': {
-        const v = args[++i]?.toUpperCase();
+        const v = (val ?? args[++i])?.toUpperCase();
         if (v !== 'A' && v !== 'B') {
           console.error('--condition must be A (Hydra gateway) or B (OpenAPI static)');
           process.exit(1);
@@ -68,23 +77,18 @@ function parseArgs() {
   return opts;
 }
 
-// ─── Adapter loading ────────────────────────────────────────────────────────
+// ─── Model selection ─────────────────────────────────────────────────────────
 
-async function loadAdapters(cliFilter) {
-  const available = ['claude', 'gemini', 'opencode'];
-  const names = cliFilter ? [cliFilter] : available;
-  const adapters = [];
+function selectModels(modelFilter) {
+  if (!modelFilter) return MODELS;
 
-  for (const name of names) {
-    if (!available.includes(name)) {
-      console.error(`Unknown CLI: ${name}. Available: ${available.join(', ')}`);
-      process.exit(1);
-    }
-    const mod = await import(`./adapters/${name}.mjs`);
-    adapters.push(mod);
+  const match = MODELS.find(m => m === modelFilter);
+  if (!match) {
+    console.error(`Unknown model: ${modelFilter}`);
+    console.error(`Available:\n${MODELS.map(m => '  ' + m).join('\n')}`);
+    process.exit(1);
   }
-
-  return adapters;
+  return [match];
 }
 
 // ─── Fixture reset ──────────────────────────────────────────────────────────
@@ -122,11 +126,11 @@ function clearMcpSessionCache() {
 
 // ─── Gateway NDJSON log matching ────────────────────────────────────────────
 
-function findNdjsonLog(clientSlug, preRunTimestamp) {
+function findNdjsonLog(preRunTimestamp) {
   if (!existsSync(EVAL_LOG_DIR)) return null;
 
   const candidates = readdirSync(EVAL_LOG_DIR)
-    .filter(f => f.endsWith('.ndjson') && f.startsWith(clientSlug + '_'))
+    .filter(f => f.endsWith('.ndjson') && f.startsWith(GATEWAY_CLIENT_SLUG + '_'))
     .map(f => ({
       name: f,
       path: join(EVAL_LOG_DIR, f),
@@ -136,8 +140,6 @@ function findNdjsonLog(clientSlug, preRunTimestamp) {
     .sort((a, b) => b.mtime - a.mtime);
 
   if (candidates.length === 0) return null;
-
-  // Prefer the most recently modified file — it's from the current run
   return candidates[0].path;
 }
 
@@ -232,8 +234,11 @@ async function evaluateGoal(task, result) {
       return verifyApiState(goal);
     }
 
+    case 'api_state_chained': {
+      return verifyApiStateChained(goal);
+    }
+
     case 'response_match': {
-      // Manual review needed
       return { pass: null, detail: 'manual review required' };
     }
 
@@ -298,11 +303,43 @@ function verifyApiState(goal) {
   }
 }
 
+function verifyApiStateChained(goal) {
+  try {
+    let baseUrl = '';
+    for (const step of goal.steps) {
+      const url = step.url || (baseUrl + step.urlSuffix);
+      const raw = execFileSync('curl', [
+        '-sk', `https://localhost${url}`,
+        '-H', 'Accept: application/ld+json',
+      ], { timeout: 10_000, encoding: 'utf-8' });
+
+      const data = JSON.parse(raw);
+
+      if (step.extract === 'first_member_id') {
+        const members = data['hydra:member'] || [];
+        if (members.length === 0) {
+          return { pass: false, detail: `no members found at ${url}` };
+        }
+        baseUrl = members[0]['@id'];
+      }
+
+      if (step.expect) {
+        const result = verifyApiState({ url, expect: step.expect });
+        if (!result.pass) return result;
+      }
+    }
+    return { pass: true, detail: 'chained API state verified' };
+  } catch (err) {
+    return { pass: false, detail: `chained API check failed: ${err.message}` };
+  }
+}
+
 // ─── Result persistence ─────────────────────────────────────────────────────
 
 function saveResult(result, condSuffix) {
   mkdirSync(RESULTS_DIR, { recursive: true });
-  const filename = `${result.taskId}_${condSuffix}_${result.cli}_${result.run}.json`;
+  const slug = result.modelSlug.replace(/\//g, '_');
+  const filename = `${result.taskId}_${condSuffix}_${slug}_${result.run}.json`;
   writeFileSync(join(RESULTS_DIR, filename), JSON.stringify(result, null, 2));
 }
 
@@ -314,11 +351,9 @@ async function main() {
   const isConditionA = opts.condition === 'A';
   const conditionLabel = isConditionA ? 'A (Hydra gateway)' : 'B (OpenAPI static)';
   const cwd = isConditionA ? TEST_HYDRA_DIR : TEST_OPENAPI_DIR;
-
-  // No system prompt injected for either condition:
-  // - Condition A: bundled as an MCP prompt in the Hydra gateway
-  // - Condition B: agent relies on OpenAPI tool schemas only
-  const systemPrompt = '';
+  const systemPrompt = isConditionA
+    ? readFileSync(SYSTEM_PROMPT_PATH, 'utf-8')
+    : '';
 
   // Filter tasks
   let tasks = TASKS;
@@ -330,20 +365,20 @@ async function main() {
     process.exit(1);
   }
 
-  // Load adapters
-  const adapters = await loadAdapters(opts.cli);
+  // Select models
+  const models = selectModels(opts.model);
 
   console.log(`\n=== Eval Benchmark Runner ===`);
   console.log(`Condition: ${conditionLabel}`);
   console.log(`CWD: ${cwd}`);
-  console.log(`Tasks: ${tasks.length}, CLIs: ${adapters.map(a => a.name).join(', ')}, Runs: ${opts.runs}`);
+  console.log(`Tasks: ${tasks.length}, Models: ${models.map(m => modelSlug(m)).join(', ')}, Runs: ${opts.runs}`);
   console.log(`Timeout: ${opts.timeoutMs}ms, Dry run: ${opts.dryRun}\n`);
 
   if (opts.dryRun) {
-    for (const adapter of adapters) {
+    for (const model of models) {
       for (const task of tasks) {
         for (let run = 1; run <= opts.runs; run++) {
-          console.log(`  [dry-run] ${adapter.name} | ${task.id} | run ${run} | "${task.prompt.slice(0, 60)}..."`);
+          console.log(`  [dry-run] ${modelSlug(model)} | ${task.id} | run ${run} | "${task.prompt.slice(0, 60)}..."`);
         }
       }
     }
@@ -354,12 +389,13 @@ async function main() {
 
   const summary = { total: 0, pass: 0, fail: 0, manual: 0, error: 0 };
 
-  for (const adapter of adapters) {
-    console.log(`\n--- CLI: ${adapter.name} (${adapter.model}) ---`);
+  for (const model of models) {
+    const slug = modelSlug(model);
+    console.log(`\n--- Model: ${slug} (${model}) ---`);
 
     for (const task of tasks) {
       for (let run = 1; run <= opts.runs; run++) {
-        console.log(`\n[${adapter.name}] Task ${task.id} (Tier ${task.tier}) — run ${run}/${opts.runs}`);
+        console.log(`\n[${slug}] Task ${task.id} (Tier ${task.tier}) — run ${run}/${opts.runs}`);
         console.log(`  Prompt: "${task.prompt}"`);
 
         summary.total++;
@@ -379,13 +415,14 @@ async function main() {
         // 2. Record pre-run timestamp
         const preRunTimestamp = Date.now();
 
-        // 3. Run CLI
-        console.log(`  Running ${adapter.name}...`);
+        // 3. Run OpenCode with this model
+        console.log(`  Running opencode --model ${model}...`);
         let cliResult;
         try {
-          cliResult = await adapter.runTask(task.prompt, systemPrompt, {
+          cliResult = await runTask(task.prompt, systemPrompt, {
             timeoutMs: opts.timeoutMs,
             cwd,
+            model,
           });
         } catch (err) {
           console.error(`  ERROR — CLI execution failed: ${err.message}`);
@@ -395,16 +432,14 @@ async function main() {
 
         console.log(`  Duration: ${(cliResult.durationMs / 1000).toFixed(1)}s, Exit: ${cliResult.exitCode}${cliResult.timedOut ? ' (TIMEOUT)' : ''}`);
 
-        // Log stderr if present
         if (cliResult.stderr) {
           console.log(`  stderr: ${cliResult.stderr.slice(0, 300)}`);
         }
 
-        // 4. Find gateway NDJSON log (Condition A only — Condition B uses stdio MCP, no gateway)
+        // 4. Find gateway NDJSON log (Condition A only)
         let ndjsonPath = null;
         if (isConditionA) {
-          const clientSlug = CLIENT_SLUGS[adapter.name] || adapter.clientSlug;
-          ndjsonPath = findNdjsonLog(clientSlug, preRunTimestamp);
+          ndjsonPath = findNdjsonLog(preRunTimestamp);
           if (ndjsonPath) {
             console.log(`  Gateway log: ${ndjsonPath.replace(PROJECT_ROOT + '/', '')}`);
           } else {
@@ -437,8 +472,8 @@ async function main() {
           taskId: task.id,
           tier: task.tier,
           condition: opts.condition,
-          cli: adapter.name,
-          model: adapter.model,
+          modelSlug: slug,
+          model,
           run,
           timestamp: new Date().toISOString(),
           prompt: task.prompt,
@@ -452,10 +487,11 @@ async function main() {
           goalResult,
           gatewayLog: ndjsonPath ? ndjsonPath.replace(PROJECT_ROOT + '/', '') : null,
           gatewayMetrics,
+          stderr: cliResult.stderr || null,
         };
 
         saveResult(resultObj, condSuffix);
-        console.log(`  Saved: var/eval/results/${task.id}_${condSuffix}_${adapter.name}_${run}.json`);
+        console.log(`  Saved: var/eval/results/${task.id}_${condSuffix}_${slug.replace(/\//g, '_')}_${run}.json`);
       }
     }
   }

@@ -143,8 +143,9 @@ final class HydraResponseParser
             }
 
             $method = strtoupper($method);
-            $uri = 'POST' === $method ? $collectionUri : $collectionUri.'/{id}';
+            $uri = $collectionUri;
 
+            $isInstance = 'POST' !== $method;
             $affordance = $this->buildOperationAffordance(
                 $operation,
                 $method,
@@ -152,6 +153,7 @@ final class HydraResponseParser
                 $uri,
                 $managedClassId,
                 $classMap,
+                $isInstance,
             );
 
             if (null !== $affordance) {
@@ -243,6 +245,7 @@ final class HydraResponseParser
         string $uri,
         ?string $expectsClassId,
         array $classMap,
+        bool $isInstance = false,
     ): ?StoredAffordance {
         // Use the operation's own name (hydra:title) as tool name — never guess from HTTP method
         $operationTitle = $operation->value(Vocab::TITLE);
@@ -255,7 +258,7 @@ final class HydraResponseParser
             ?? $toolName;
 
         $expects = $operation->id(Vocab::EXPECTS) ?? $expectsClassId;
-        $inputSchema = $this->buildInputSchemaFromClass($expects, $classMap, $method, $uri);
+        $inputSchema = $this->buildInputSchemaFromClass($expects, $classMap, $method, $isInstance);
 
         return new StoredAffordance(
             name: $toolName,
@@ -270,9 +273,14 @@ final class HydraResponseParser
     /**
      * @param array<string, JsonLdNode> $classMap
      */
-    private function buildInputSchemaFromClass(?string $classId, array $classMap, string $method, string $uri): array
+    private function buildInputSchemaFromClass(?string $classId, array $classMap, string $method, bool $isInstance): array
     {
-        $needsUri = str_contains($uri, '{id}') || 'POST' !== $method && 'GET' !== $method;
+        $needsUri = $isInstance && 'POST' !== $method;
+
+        // DELETE and GET don't need body properties — only the uri parameter
+        if ('DELETE' === $method || 'GET' === $method) {
+            return $this->assembleSchema([], [], $method, $needsUri);
+        }
 
         $class = $this->resolveClass($classId, $classMap);
         $properties = [];
@@ -304,7 +312,8 @@ final class HydraResponseParser
 
                 $properties[$propName] = $propSchema;
 
-                if (true === $supportedProp->value(Vocab::REQUIRED)) {
+                // PATCH is a partial update — no properties should be required
+                if ('PATCH' !== $method && true === $supportedProp->value(Vocab::REQUIRED)) {
                     $required[] = $propName;
                 }
             }

@@ -1,17 +1,22 @@
 import { spawn } from 'node:child_process';
 
-export const name = 'opencode';
-export const model = 'github-copilot/gpt-5.3-codex';
-export const clientSlug = 'github-copilot-developer';
+const DEFAULT_MODEL = 'github-copilot/gpt-5.3-codex';
 
 /**
  * Run a single task prompt via OpenCode CLI in headless mode.
  * OpenCode uses the `run` subcommand for non-interactive mode.
  *
+ * @param {string} prompt
+ * @param {string} systemPrompt
+ * @param {object} opts
+ * @param {number} opts.timeoutMs
+ * @param {string} opts.cwd
+ * @param {string} opts.model - Full model ID (e.g. 'github-copilot/claude-sonnet-4.6')
+ *
  * JSON format outputs JSONL events with types:
  *   step_start, tool_use, text, step_finish, error
  */
-export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd } = {}) {
+export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model } = {}) {
   return new Promise((resolve) => {
     const start = Date.now();
 
@@ -21,12 +26,13 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd } = {})
 
     const args = [
       'run', fullPrompt,
-      '--model', model,
+      '--model', model || DEFAULT_MODEL,
       '--format', 'json',
     ];
 
     const env = { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' };
-    const child = spawn('opencode', args, {
+    const opencodeBin = process.env.OPENCODE_BIN || 'opencode';
+    const child = spawn(opencodeBin, args, {
       env,
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],

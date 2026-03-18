@@ -15,14 +15,21 @@ export const TEST_HYDRA_DIR = '/home/soyuka/projects/test-hydra-mcp';
 // Condition B: OpenAPI static MCP (all tools pre-registered at init)
 export const TEST_OPENAPI_DIR = '/home/soyuka/projects/test-openapi-mcp';
 
-// Client slug mapping (adapter name → NDJSON file prefix from McpEvalLogger)
-// Note: Condition A logs go through the gateway (McpEvalLogger), Condition B
-// uses a stdio MCP server so there are no gateway logs — only CLI-reported usage.
-export const CLIENT_SLUGS = {
-  claude: 'claude-code',
-  gemini: 'gemini-cli-mcp-client',
-  opencode: 'github-copilot-developer',
-};
+// All models run through OpenCode CLI via GitHub Copilot
+// Use full model IDs; select with --model=github-copilot/gpt-5-mini
+export const MODELS = [
+  // 'github-copilot/claude-sonnet-4.6',
+  'github-copilot/gemini-3-flash-preview',
+  // 'github-copilot/gpt-4.1',
+  // 'mistral/mistral-medium-latest',
+  // 'mistral/devstral-medium-latest',
+  'github-copilot/gpt-5-mini',
+];
 
+// Derive a short slug from a full model ID for filenames/display
+export function modelSlug(id) {
+  return id.replace(/^github-copilot\//, '');
+}
 
-
+// Gateway NDJSON log prefix (OpenCode identifies as "opencode" to the gateway)
+export const GATEWAY_CLIENT_SLUG = 'opencode';

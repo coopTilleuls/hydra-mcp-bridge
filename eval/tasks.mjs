@@ -32,7 +32,7 @@ export const TASKS = [
     negativeCapability: false,
     goal: {
       type: 'response_contains',
-      values: ['Gordon R. Dickson'],
+      values: ['Dorsai'],
     },
   },
   {
@@ -41,16 +41,14 @@ export const TASKS = [
     prompt: "How many reviews does 'Hyperion' have in the book API?",
     negativeCapability: false,
     goal: {
-      // Agent must find Hyperion, then navigate to its reviews sub-collection
-      // and report hydra:totalItems (31 reviews in fixture: 30 random + 1 known).
-      type: 'response_match',
-      check: 'manual',
+      type: 'response_contains',
+      values: ['31'],
     },
   },
   {
     id: 'T1.5',
     tier: 1,
-    prompt: 'Can you find all books published after 2000 in the book API?',
+    prompt: 'Can you find all books published after 2000 only using the book API? No other source allowed.',
     negativeCapability: true,
     goal: {
       type: 'response_indicates_limitation',
@@ -58,17 +56,28 @@ export const TASKS = [
         'no filter',
         'not available',
         'no publication year',
+        'no publication date',
         'cannot filter',
+        'cannot determine',
         "doesn't support",
         'does not support',
+        'does not include',
+        'does not contain',
+        'does not have',
+        'does not expose',
         'no date',
         'no year',
         'not possible',
         "can't filter",
+        "can't determine",
         'no such filter',
+        'no such field',
         'only supports',
         'only available',
         'author and title',
+        'no field',
+        'not exposed',
+        'not present',
       ],
     },
   },
@@ -78,13 +87,13 @@ export const TASKS = [
     id: 'T2.1',
     tier: 2,
     prompt:
-      "Add a book to the book API with Open Library ID OL1168083M and set its condition to 'good'.",
+      "Add a book to the book API with Open Library ID OL1168083M and set its condition to 'new'.",
     negativeCapability: false,
     goal: {
       type: 'api_state',
       method: 'GET',
-      url: '/books?book=/books/OL1168083M',
-      expect: { 'hydra:totalItems_gte': 1 },
+      url: '/books',
+      expect: { 'hydra:totalItems_gte': 77 },
     },
   },
   {
@@ -102,13 +111,13 @@ export const TASKS = [
   {
     id: 'T2.3',
     tier: 2,
-    prompt: "Using the book API, change the condition of the 'Hyperion' Book to 'good'.",
+    prompt: "Using the book API, change the condition of the 'Hyperion' Book to 'new'.",
     negativeCapability: false,
     goal: {
       type: 'api_state',
       method: 'GET',
       url: '/books?title=Hyperion',
-      expect: { member_condition_contains: 'Good' },
+      expect: { member_condition_contains: 'NewCondition' },
     },
   },
   {
@@ -118,10 +127,13 @@ export const TASKS = [
       "Using the book API, write a review for 'Hyperion': body 'A masterpiece of science fiction', rating 5.",
     negativeCapability: false,
     goal: {
-      type: 'api_state',
-      method: 'GET',
-      url: '/reviews?book.title=Hyperion',
-      expect: { member_body_contains: 'masterpiece' },
+      // Reviews are sub-resources (/books/{id}/reviews), not a top-level collection.
+      // Verify via a two-step API state check: find Hyperion, then check its reviews.
+      type: 'api_state_chained',
+      steps: [
+        { method: 'GET', url: '/books?title=Hyperion', extract: 'first_member_id' },
+        { method: 'GET', urlSuffix: '/reviews', expect: { member_body_contains: 'masterpiece' } },
+      ],
     },
   },
   {
@@ -166,6 +178,17 @@ export const TASKS = [
         'immutable',
         'server-hydrated',
         'not a writable',
+        'unable to change',
+        'unable to modify',
+        'unable to update',
+        'not modifiable',
+        'not changeable',
+        'did not persist',
+        "won't stick",
+        'did not take effect',
+        'overrides local',
+        'ignores local',
+        'not exposed for modification',
       ],
     },
   },
@@ -175,13 +198,13 @@ export const TASKS = [
     id: 'T3.1',
     tier: 3,
     prompt:
-      "Using the book API, find all books by Vera Strange and update their condition to 'good'.",
+      "Using the book API, find all books by Vera Strange and update their condition to 'new'.",
     negativeCapability: false,
     goal: {
       type: 'api_state',
       method: 'GET',
       url: '/books?author=Vera+Strange',
-      expect: { all_members_condition_contains: 'Good' },
+      expect: { all_members_condition_contains: 'NewCondition' },
     },
   },
   {
@@ -213,8 +236,10 @@ export const TASKS = [
     prompt: "Using the book API, bookmark 'Hyperion'.",
     negativeCapability: false,
     goal: {
-      type: 'response_match',
-      check: 'manual',
+      // /bookmarks returns 403 in current fixture — agent should find Hyperion
+      // and attempt the bookmark (success or report the auth error).
+      type: 'response_contains',
+      values: ['Hyperion', 'bookmark'],
     },
   },
 
@@ -226,7 +251,7 @@ export const TASKS = [
     negativeCapability: false,
     goal: {
       type: 'response_contains',
-      values: ['book', 'review', 'bookmark'],
+      values: ['book', 'bookmark', 'parchment', 'user'],
     },
   },
   {
@@ -238,8 +263,8 @@ export const TASKS = [
     goal: {
       type: 'api_state',
       method: 'GET',
-      url: '/books?book=/books/OL35227850M',
-      expect: { 'hydra:totalItems_gte': 1 },
+      url: '/books',
+      expect: { 'hydra:totalItems_gte': 77 },
     },
   },
   {

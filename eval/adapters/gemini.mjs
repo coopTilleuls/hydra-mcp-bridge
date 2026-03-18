@@ -82,7 +82,11 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd } = {})
           };
         }
       } catch {
+        // Non-JSON output — use raw stdout, include stderr for diagnostics
         response = stdout.trim();
+        if (stderr.trim() && !response) {
+          response = `[stderr]: ${stderr.trim()}`;
+        }
       }
 
       // Exit code 53 = turn limit reached

@@ -86,8 +86,9 @@ final class DynamicToolRequestHandler implements RequestHandlerInterface
 
     private function handleOperation(CallToolRequest $request, \App\Mcp\StoredAffordance $config): string
     {
+        $contentType = 'PATCH' === $config->method ? 'application/merge-patch+json' : 'application/ld+json';
         $options = [
-            'headers' => ['Content-Type' => 'application/ld+json'],
+            'headers' => ['Content-Type' => $contentType],
         ];
 
         if ('DELETE' !== $config->method) {
@@ -102,6 +103,10 @@ final class DynamicToolRequestHandler implements RequestHandlerInterface
             }
         }
 
-        return $this->hydraClient->request($config->method, $config->uri, $options)->getContent();
+        // Use the agent-supplied URI directly when available (instance operations),
+        // otherwise fall back to the stored collection URI (POST).
+        $uri = isset($request->arguments['uri']) ? $request->arguments['uri'] : $config->uri;
+
+        return $this->hydraClient->request($config->method, $uri, $options)->getContent();
     }
 }

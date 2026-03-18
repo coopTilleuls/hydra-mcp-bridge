@@ -16,16 +16,23 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { TASKS } from './tasks.mjs';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = resolve(__dirname, '..', 'var/eval/results');
 
+// Build task lookup by ID for re-evaluation
+const TASK_BY_ID = Object.fromEntries(TASKS.map(t => [t.id, t]));
+
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { format: 'table', cli: null, tier: null, condition: null };
+  const opts = { format: 'table', model: null, tier: null, condition: null };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--format': opts.format = args[++i]; break;
-      case '--cli': opts.cli = args[++i]; break;
+      case '--model': opts.model = args[++i]; break;
+      // Legacy compat
+      case '--cli': opts.model = args[++i]; break;
       case '--tier': opts.tier = parseInt(args[++i], 10); break;
       case '--condition': opts.condition = args[++i]?.toUpperCase(); break;
     }
@@ -33,11 +40,62 @@ function parseArgs() {
   return opts;
 }
 
+// Normalize result: old format uses `cli`, new format uses `modelSlug`.
+// We unify on `agent` as the grouping key.
+function agentKey(r) {
+  return r.modelSlug || r.cli;
+}
+
+// Re-evaluate response-based goals against current task definitions.
+// API state goals (api_state, api_state_chained) cannot be re-evaluated
+// offline — the DB state is gone — so we keep the baked result for those.
+function reEvaluateGoal(result) {
+  const task = TASK_BY_ID[result.taskId];
+  if (!task) return result.goalResult; // unknown task, keep original
+
+  const { goal } = task;
+  const text = (result.response || '').toLowerCase();
+
+  switch (goal.type) {
+    case 'response_contains': {
+      const allFound = goal.values.every(v => text.includes(v.toLowerCase()));
+      return {
+        pass: allFound,
+        detail: allFound
+          ? 'all keywords found'
+          : `missing: ${goal.values.filter(v => !text.includes(v.toLowerCase())).join(', ')}`,
+      };
+    }
+
+    case 'response_contains_any': {
+      const anyFound = goal.values.some(v => text.includes(v.toLowerCase()));
+      return { pass: anyFound, detail: anyFound ? 'keyword found' : 'no keywords found' };
+    }
+
+    case 'response_indicates_limitation': {
+      const anyFound = goal.keywords.some(kw => text.includes(kw.toLowerCase()));
+      return {
+        pass: anyFound,
+        detail: anyFound ? 'limitation acknowledged' : 'no limitation reported',
+      };
+    }
+
+    default:
+      // api_state, api_state_chained, response_match — keep baked result
+      return result.goalResult;
+  }
+}
+
 function loadResults(opts) {
   const files = readdirSync(RESULTS_DIR).filter(f => f.endsWith('.json') && f !== 'summary.json');
   let results = files.map(f => JSON.parse(readFileSync(join(RESULTS_DIR, f), 'utf-8')));
 
-  if (opts.cli) results = results.filter(r => r.cli === opts.cli);
+  // Re-evaluate response-based goals against current task definitions
+  for (const r of results) {
+    r.goalResult = reEvaluateGoal(r);
+  }
+
+  if (opts.model) results = results.filter(r => agentKey(r) === opts.model);
   if (opts.tier) results = results.filter(r => r.tier === opts.tier);
   if (opts.condition) results = results.filter(r => r.condition === opts.condition);
 
@@ -66,10 +124,9 @@ function iqr(arr) {
 // ─── M1: Task Completion ────────────────────────────────────────────────────
 
 function computeM1(results) {
-  // Group by taskId × condition × cli
   const groups = {};
   for (const r of results) {
-    const key = `${r.taskId}_${r.condition || 'A'}_${r.cli}`;
+    const key = `${r.taskId}_${r.condition || 'A'}_${agentKey(r)}`;
     if (!groups[key]) groups[key] = [];
     groups[key].push(r);
   }
@@ -79,14 +136,13 @@ function computeM1(results) {
     const autoEval = runs.filter(r => r.goalResult?.pass !== null);
     const passes = autoEval.filter(r => r.goalResult?.pass === true);
     const passRate = autoEval.length > 0 ? passes.length / autoEval.length : null;
-    // pass^k: fraction where ALL runs pass
     const allPass = autoEval.length > 0 && autoEval.every(r => r.goalResult?.pass === true);
 
     rows.push({
       taskId: runs[0].taskId,
       tier: runs[0].tier,
       condition: runs[0].condition || 'A',
-      cli: runs[0].cli,
+      agent: agentKey(runs[0]),
       runs: runs.length,
       autoEvaluated: autoEval.length,
       passes: passes.length,
@@ -104,16 +160,18 @@ function computeM1(results) {
 function computeM2(results) {
   const groups = {};
   for (const r of results) {
-    const key = `${r.taskId}_${r.cli}`;
+    const key = `${r.taskId}_${agentKey(r)}`;
     if (!groups[key]) groups[key] = [];
     groups[key].push(r.gatewayMetrics?.toolCallCount || 0);
   }
 
   return Object.entries(groups).map(([key, counts]) => {
-    const [taskId, cli] = key.split('_');
+    const parts = key.split('_');
+    const agent = parts.pop();
+    const taskId = parts.join('_');
     return {
       taskId,
-      cli,
+      agent,
       median: median(counts),
       mean: mean(counts).toFixed(1),
       min: Math.min(...counts),
@@ -128,15 +186,15 @@ function computeM2(results) {
 function computeM3(results) {
   const groups = {};
   for (const r of results) {
-    const key = r.cli;
+    const key = agentKey(r);
     if (!groups[key]) groups[key] = { errors: 0, toolCalls: 0, runs: 0 };
     groups[key].errors += r.gatewayMetrics?.errorCount || 0;
     groups[key].toolCalls += r.gatewayMetrics?.toolCallCount || 0;
     groups[key].runs++;
   }
 
-  return Object.entries(groups).map(([cli, g]) => ({
-    cli,
+  return Object.entries(groups).map(([agent, g]) => ({
+    agent,
     totalErrors: g.errors,
     totalToolCalls: g.toolCalls,
     errorRate: g.toolCalls > 0 ? (g.errors / g.toolCalls * 100).toFixed(1) + '%' : 'N/A',
@@ -145,36 +203,167 @@ function computeM3(results) {
 }
 
 // ─── M5: Token / Context Cost ───────────────────────────────────────────────
+//
+// Token totals include cache tokens (cacheReadTokens, cacheCreationTokens)
+// because they represent real context processed by the model, even if billed
+// at a discount. Without them, Claude's numbers look artificially low.
+
+function effectiveTokens(usage) {
+  if (!usage) return { input: 0, output: 0, total: 0 };
+  const input = (usage.inputTokens || 0)
+    + (usage.cacheReadTokens || 0)
+    + (usage.cacheCreationTokens || 0);
+  const output = usage.outputTokens || 0;
+  return { input, output, total: input + output };
+}
 
 function computeM5(results) {
   const groups = {};
   for (const r of results) {
-    const key = `${r.taskId}_${r.cli}`;
-    if (!groups[key]) groups[key] = [];
+    const agent = agentKey(r);
+    const key = `${r.taskId}_${r.condition || 'A'}_${agent}`;
+    if (!groups[key]) groups[key] = { agent, condition: r.condition || 'A', taskId: r.taskId, runs: [] };
 
     const snapshots = r.gatewayMetrics?.toolListSnapshots || [];
     const cumulativeTools = snapshots.reduce((s, v) => s + v, 0);
-    const usage = r.usage || {};
+    const eff = effectiveTokens(r.usage);
 
-    groups[key].push({
+    groups[key].runs.push({
       cumulativeToolListSize: cumulativeTools,
-      inputTokens: usage.inputTokens || 0,
-      outputTokens: usage.outputTokens || 0,
-      totalTokens: usage.totalTokens || 0,
+      inputTokens: eff.input,
+      outputTokens: eff.output,
+      totalTokens: eff.total,
     });
   }
 
-  return Object.entries(groups).map(([key, runs]) => {
-    const [taskId, cli] = key.split('_');
+  return Object.entries(groups).map(([key, { agent, condition, taskId, runs }]) => {
     return {
       taskId,
-      cli,
+      condition,
+      agent,
       medianCumulativeTools: median(runs.map(r => r.cumulativeToolListSize)),
       medianInputTokens: median(runs.map(r => r.inputTokens)),
       medianOutputTokens: median(runs.map(r => r.outputTokens)),
       medianTotalTokens: median(runs.map(r => r.totalTokens)),
     };
   });
+}
+
+// ─── M6: Tool Schema Overhead ──────────────────────────────────────────────
+//
+// Estimates how many tokens of each turn's context are spent on tool schemas.
+//
+// OpenAPI (condition B): all 19 tools are injected into every turn.
+// Hydra   (condition A): starts with 1 tool, grows lazily as collections
+//                         are visited — only the tools the agent needs.
+//
+// This gap widens with API size: a 200-operation API would inject ~17,800
+// tool-schema tokens per turn under OpenAPI, while the Hydra gateway still
+// starts at ~51.
+
+// Measured from the actual OpenAPI MCP server tools/list response
+const OPENAPI_TOOL_COUNT = 19;
+const OPENAPI_SCHEMA_TOKENS = 1685; // ~6738 chars / 4
+const HYDRA_STATIC_SCHEMA_TOKENS = 51; // 1 tool, ~202 chars / 4
+const AVG_TOKENS_PER_HYDRA_TOOL = 80; // Hydra tools have simpler schemas
+
+function computeM6(results) {
+  const rows = [];
+  for (const r of results) {
+    if (!r.usage) continue; // skip runs with no usage data
+
+    const isA = (r.condition || 'A') === 'A';
+    const eff = effectiveTokens(r.usage);
+    if (eff.input === 0) continue;
+
+    let schemaTokensPerTurn;
+    let maxToolCount;
+
+    if (isA) {
+      const snapshots = r.gatewayMetrics?.toolListSnapshots || [1];
+      maxToolCount = Math.max(1, ...snapshots);
+      // Average tools across snapshots ≈ turns
+      const avgToolCount = snapshots.length > 0
+        ? snapshots.reduce((s, v) => s + v, 0) / snapshots.length
+        : 1;
+      schemaTokensPerTurn = Math.ceil(avgToolCount * AVG_TOKENS_PER_HYDRA_TOOL);
+    } else {
+      maxToolCount = OPENAPI_TOOL_COUNT;
+      schemaTokensPerTurn = OPENAPI_SCHEMA_TOKENS;
+    }
+
+    // Estimate turn count from gateway calls (A) or input growth (B)
+    let turns;
+    if (isA) {
+      turns = Math.max(1, (r.gatewayMetrics?.toolCallCount || 0) + 1);
+    } else {
+      // Each turn re-sends schemas + growing conversation
+      turns = Math.max(1, Math.round(eff.input / (schemaTokensPerTurn + 500)));
+    }
+
+    const cumulativeSchemaOverhead = schemaTokensPerTurn * turns;
+    const schemaPctOfInput = ((cumulativeSchemaOverhead / eff.input) * 100).toFixed(1);
+
+    rows.push({
+      taskId: r.taskId,
+      condition: r.condition || 'A',
+      agent: agentKey(r),
+      maxTools: maxToolCount,
+      schemaPerTurn: schemaTokensPerTurn,
+      estTurns: turns,
+      schemaOverhead: cumulativeSchemaOverhead,
+      inputTokens: eff.input,
+      schemaPct: schemaPctOfInput + '%',
+    });
+  }
+
+  return rows;
+}
+
+// ─── M7: A vs B Comparison (per CLI) ───────────────────────────────────────
+
+function computeComparison(results) {
+  // Group by agent × condition
+  const groups = {};
+  for (const r of results) {
+    const agent = agentKey(r);
+    const cond = r.condition || 'A';
+    const key = `${cond}_${agent}`;
+    if (!groups[key]) groups[key] = { condition: cond, agent, pass: 0, fail: 0, manual: 0, totalTokens: 0, count: 0, broken: 0 };
+    const g = groups[key];
+    g.count++;
+    const eff = effectiveTokens(r.usage);
+    g.totalTokens += eff.total;
+    if (r.goalResult?.pass === true) g.pass++;
+    else if (r.goalResult?.pass === false) g.fail++;
+    else g.manual++;
+    // Detect infrastructure failures (no usage = broken MCP)
+    if (!r.usage || (eff.total === 0 && r.exitCode !== 0)) g.broken++;
+  }
+
+  // Collect unique agents that have both A and B results
+  const agents = new Set();
+  for (const { agent } of Object.values(groups)) agents.add(agent);
+
+  const rows = [];
+  for (const agent of agents) {
+    const a = groups['A_' + agent];
+    const b = groups['B_' + agent];
+    if (!a || !b) continue;
+    const aAutoTotal = a.pass + a.fail;
+    const bAutoTotal = b.pass + b.fail;
+    rows.push({
+      agent,
+      'A_pass': `${a.pass}/${aAutoTotal}`,
+      'A_tokens': a.totalTokens,
+      'A_broken': a.broken,
+      'B_pass': `${b.pass}/${bAutoTotal}`,
+      'B_tokens': b.totalTokens,
+      'B_broken': b.broken,
+      tokenRatio: b.totalTokens > 0 ? (a.totalTokens / b.totalTokens).toFixed(2) + 'x' : 'N/A (B=0)',
+    });
+  }
+  return rows;
 }
 
 // ─── Output formatting ──────────────────────────────────────────────────────
@@ -203,8 +392,8 @@ function toCsv(rows) {
 function tierSummary(m1Rows) {
   const tiers = {};
   for (const row of m1Rows) {
-    const key = `Tier ${row.tier} — ${row.condition} — ${row.cli}`;
-    if (!tiers[key]) tiers[key] = { tier: row.tier, condition: row.condition, cli: row.cli, tasks: 0, passes: 0, autoEval: 0, allPassK: 0 };
+    const key = `Tier ${row.tier} — ${row.condition} — ${row.agent}`;
+    if (!tiers[key]) tiers[key] = { tier: row.tier, condition: row.condition, agent: row.agent, tasks: 0, passes: 0, autoEval: 0, allPassK: 0 };
     tiers[key].tasks++;
     tiers[key].passes += row.passes;
     tiers[key].autoEval += row.autoEvaluated;
@@ -214,7 +403,7 @@ function tierSummary(m1Rows) {
   return Object.values(tiers).map(t => ({
     tier: t.tier,
     condition: t.condition,
-    cli: t.cli,
+    agent: t.agent,
     tasks: t.tasks,
     passRate: t.autoEval > 0 ? (t.passes / t.autoEval * 100).toFixed(1) + '%' : 'N/A',
     passK: `${t.allPassK}/${t.tasks}`,
@@ -245,6 +434,8 @@ function main() {
   const m2 = computeM2(results);
   const m3 = computeM3(results);
   const m5 = computeM5(results);
+  const m6 = computeM6(results);
+  const comparison = computeComparison(results);
   const tiers = tierSummary(m1);
 
   if (opts.format === 'csv') {
@@ -254,8 +445,12 @@ function main() {
     console.log(toCsv(m2));
     console.log('\n--- M3: Error Rate ---');
     console.log(toCsv(m3));
-    console.log('\n--- M5: Token/Context Cost ---');
+    console.log('\n--- M5: Token/Context Cost (includes cache tokens) ---');
     console.log(toCsv(m5));
+    console.log('\n--- M6: Tool Schema Overhead ---');
+    console.log(toCsv(m6));
+    console.log('\n--- A vs B Comparison ---');
+    console.log(toCsv(comparison));
     console.log('\n--- Tier Summary ---');
     console.log(toCsv(tiers));
 
@@ -265,13 +460,17 @@ function main() {
     writeFileSync(join(RESULTS_DIR, 'summary_m2.csv'), toCsv(m2));
     writeFileSync(join(RESULTS_DIR, 'summary_m3.csv'), toCsv(m3));
     writeFileSync(join(RESULTS_DIR, 'summary_m5.csv'), toCsv(m5));
+    writeFileSync(join(RESULTS_DIR, 'summary_m6.csv'), toCsv(m6));
+    writeFileSync(join(RESULTS_DIR, 'summary_comparison.csv'), toCsv(comparison));
     writeFileSync(join(RESULTS_DIR, 'summary_tiers.csv'), toCsv(tiers));
     console.log(`\nCSV files written to ${RESULTS_DIR}/summary_*.csv`);
   } else {
     printTable('M1: Task Completion', m1);
     printTable('M2: Tool Call Count (per task × cli)', m2);
     printTable('M3: Error Rate (aggregate per CLI)', m3);
-    printTable('M5: Token / Context Cost', m5);
+    printTable('M5: Token / Context Cost (includes cache tokens)', m5);
+    printTable('M6: Tool Schema Overhead', m6);
+    printTable('A vs B Comparison', comparison);
     printTable('Tier Summary', tiers);
 
     // Negative capability breakdown
@@ -282,7 +481,7 @@ function main() {
   }
 
   // Write JSON summary
-  const summary = { m1, m2, m3, m5, tiers, resultCount: results.length };
+  const summary = { m1, m2, m3, m5, m6, comparison, tiers, resultCount: results.length };
   mkdirSync(RESULTS_DIR, { recursive: true });
   writeFileSync(join(RESULTS_DIR, 'summary.json'), JSON.stringify(summary, null, 2));
   console.log(`\nJSON summary: ${RESULTS_DIR}/summary.json`);
