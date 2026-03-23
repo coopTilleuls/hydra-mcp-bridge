@@ -31,7 +31,7 @@ K\'{e}vin Dunglas\\\texttt{kevin@dunglas.fr}\\ORCID: \href{https://orcid.org/000
 \maketitle
 
 \begin{abstract}
-Agent-based AI systems using protocols like the Model Context Protocol (MCP) are designed to interact with software. MCP provides a clear separation of concerns, with ``application-controlled'' \texttt{Resources} for context and ``model-controlled'' \texttt{Tools} for actions. This paradigm is challenged by HATEOAS (Hypermedia as the Engine of Application State) APIs, such as those using the Hydra Core Vocabulary. In these systems, available actions (affordances) are not static but are discovered at runtime within the content of resources. This creates an impedance mismatch: the API expects the client to discover actions by reading content, but the MCP model is sandboxed and can only use predefined tools. This paper analyzes this mismatch and rejects two common integration hypotheses. We then propose a \textbf{Dynamic Gateway Architecture} as a solution. This architecture acts as a translator, operating through three discovery phases---navigating the API entrypoint to give the agent a map of available collections, lazily registering typed CRUD and search tools when the agent visits a specific collection by cross-referencing its response with the API documentation (\texttt{docs.jsonld}), and honoring inline operation overrides that reflect per-resource state. Paired with a generic system prompt that teaches the agent \emph{how} to discover rather than \emph{what} to discover, the gateway dynamically promotes hypermedia affordances into model-callable \texttt{tools}, bridging the two protocols without violating the constraints of either.
+Agent-based AI systems using protocols like the Model Context Protocol (MCP) separate ``application-controlled'' \texttt{Resources} (read-only context) from ``model-controlled'' \texttt{Tools} (callable actions). This paradigm is challenged by HATEOAS APIs such as those using the Hydra Core Vocabulary, where available actions are not static but discovered at runtime within resource content. The API expects the client to discover actions by reading content, but the MCP model is sandboxed and can only use predefined tools. We show that neither static endpoint-to-tool mapping nor a generic API-call tool preserves hypermedia discovery, and propose a \textbf{Dynamic Gateway Architecture} that resolves this mismatch. The gateway operates through three discovery phases---navigating the API entrypoint to give the agent a map of available collections, lazily registering typed CRUD and search tools when the agent visits a specific collection by cross-referencing its response with the API documentation (\texttt{docs.jsonld}), and honoring inline operation overrides that reflect per-resource state. A single static tool whose description embeds navigational guidance bootstraps the entire process without a system prompt. In a comparative evaluation against a static OpenAPI baseline (19~tasks, two models, $k{=}3$ runs), agents achieve 100\% task completion on all 15 positive-capability tasks ($n{=}90$ per condition), while the gateway reduces tool-schema overhead from 77\% to 2\% of input context---bridging the two protocols without violating the constraints of either.
 \end{abstract}
 
 \section{Introduction}
@@ -49,7 +49,7 @@ This creates an ``impedance mismatch'' based on a fundamental conflict between t
 
 The mismatch is this: The Hydra API expects a client that \emph{discovers its actions by reading content}, but the MCP AI model is a client that \emph{cannot read content on its own} and \emph{can only use predefined actions}.
 
-The research problem is: \textbf{How to bridge the gap between Hydra's content-based, state-dependent affordances and MCP's model-controlled, predefined \texttt{tool} paradigm?} This paper will first analyze two common integration hypotheses that fail to solve this problem, and then propose a new architecture as a solution.
+The research problem is: \textbf{How to bridge the gap between Hydra's content-based, state-dependent affordances and MCP's model-controlled, predefined \texttt{tool} paradigm?} This paper analyzes this mismatch, rejects two common integration models, and proposes a Dynamic Gateway Architecture that bridges the two protocols through lazy, navigation-triggered tool discovery.
 
 \section{Analysis of Integration Models and Rejected Hypotheses}
 
@@ -65,30 +65,31 @@ By pre-generating all operations as static tools, the gateway breaks the HATEOAS
 
 The next hypothesis was to try a single, generic tool. The hypothesis is that an LLM can be given one tool like \texttt{call\_api(endpoint, method, payload)} and be instructed to parse the context to find the arguments. This model fails because it collapses navigation and mutation into one undifferentiated action. When a single tool handles both \texttt{GET} requests (whose primary purpose is discovery) and state-changing requests, the gateway has no structural hook to distinguish them: it cannot know when to intercept a response and extract affordances versus when to simply return a mutation result. The tool also requires the LLM to know the API's endpoints (\texttt{/recipes}, \texttt{/users}) and HTTP methods in advance to construct the first call---it provides no bootstrapping mechanism. The LLM does not have this a-priori knowledge; it is designed to \emph{discover} its options from its context. As we will show in our proposed architecture, separating navigation from mutation is essential: the navigation tool becomes the gateway's interception point for affordance discovery, while dynamically discovered typed tools handle state changes.
 
+\section{Background and Positioning}
+
+Fielding's REST dissertation introduced the HATEOAS constraint---that a client should discover available actions entirely through hypermedia controls embedded in server responses~\cite{fielding2000}. The Hydra Core Vocabulary~\cite{hydra} operationalizes this constraint for machine clients by encoding operations, property schemas, and link relations in JSON-LD. Despite two decades of REST, most recent work on LLM--API integration treats APIs as static function catalogs rather than navigable hypermedia systems.
+
+Several lines of work have explored how LLMs can invoke tools and APIs. Some bake a fixed tool set into the model itself---Toolformer~\cite{schick2023toolformer} trains an LLM to self-supervisedly insert calls to a small, predetermined repertoire of tools during generation. Others scale the catalog: AnyTool~\cite{du2024anytool} introduces a hierarchical agent that retrieves from 16,000+ pre-indexed API descriptions, but ``discovery'' remains a search over a static index, not an extraction from API responses. RestGPT~\cite{song2023restgpt} chains RESTful API calls via a planning module but requires an upfront OpenAPI specification to enumerate all available endpoints. Benchmarks such as API-Bank~\cite{li2023apibank} evaluate tool-use capabilities against a fixed set of 73~API tools. The common thread is the assumption of a \emph{static, pre-indexed API catalog}: the set of available operations is available to the system before the interaction begins. None of these designs address runtime-discovered, state-dependent affordances---the distinguishing characteristic of HATEOAS APIs.
+
+We do not empirically compare against these systems---they address a different problem (selecting from known APIs), not runtime affordance discovery. Our empirical comparison (Section~5) evaluates against a static OpenAPI baseline, the natural counterpart for the same API.
+
 \section{The Dynamic Gateway Architecture: A Proposed Solution}
 
-The analysis of these failed models led to our proposed solution: a \textbf{Dynamic Gateway Architecture}. This design integrates the two protocols without violating the constraints of either. It is governed by two principles:
-
-\begin{enumerate}
-  \item \textbf{MCP Philosophy is Respected:} The AI model is sandboxed. It \emph{cannot} call \texttt{resources/read}. Only the host \emph{application} can read resources. The AI can \emph{only} call \texttt{tools}~\cite{mcp-tools}.
-  \item \textbf{Hydra Philosophy is Respected:} The gateway \emph{cannot} have a static, hardcoded list of all API endpoints. It must discover available operations by navigating the API's hypermedia controls~\cite{hydra}.
-\end{enumerate}
-
-This design consists of one static tool and a set of dynamically discovered tools, connected by a multi-phase discovery process. Figure~\ref{fig:discovery} illustrates the message flow across all three discovery phases.
+The analysis of these failed models led to our proposed solution: a \textbf{Dynamic Gateway Architecture}. The design is governed by two constraints: the AI model remains sandboxed---it can only call \texttt{tools}, not \texttt{resources/read}~\cite{mcp-tools}---and the gateway cannot have a static, hardcoded list of endpoints; it must discover operations by navigating hypermedia controls~\cite{hydra}. The architecture consists of one static tool and a set of dynamically discovered tools, connected by a multi-phase discovery process illustrated in Figure~\ref{fig:discovery}.
 
 \subsection{The Static ``Navigation'' Tool}
 
 A single static tool is defined that is always available. This tool enables the AI to perform HATEOAS navigation and is the gateway's sole interception point for affordance discovery.
 
 \begin{itemize}
-  \item \textbf{Tool:} \texttt{read\_hydra\_resource(uri)}
+  \item \textbf{Tool:} \texttt{read\_api\_resource(uri)}
   \item \textbf{Purpose:} This tool allows the AI to request that the application fetch a resource (a \texttt{GET} request) and place its content into the context for the \emph{next} turn. Its purpose is to \emph{learn, navigate, and discover}.
-  \item \textbf{Mechanism:} When the AI model sees a link in its context (e.g., a URI for \texttt{book} in an \texttt{Entrypoint}), it can call \texttt{read\_hydra\_resource(uri: "/books")}. The \emph{implementation} of this tool on the gateway is what triggers the dynamic discovery process described in Section~3.2. This is the only tool the agent starts with; all other tools are discovered dynamically.
+  \item \textbf{Mechanism:} When the AI model sees a link in its context (e.g., a URI for \texttt{book} in an \texttt{Entrypoint}), it can call \texttt{read\_api\_resource(uri: "/books")}. The \emph{implementation} of this tool on the gateway is what triggers the dynamic discovery process described in Section~4.2. This is the only tool the agent starts with; all other tools are discovered dynamically.
 \end{itemize}
 
 \subsection{The Dynamic ``Discovery'' Process (Triggered by Navigation)}
 
-The core of our architecture is the process triggered by the \texttt{read\_hydra\_resource} tool. Discovery operates through three phases, each corresponding to a distinct moment in the agent's interaction with the API.
+The core of our architecture is the process triggered by the \texttt{read\_api\_resource} tool. Discovery operates through three phases, each corresponding to a distinct moment in the agent's interaction with the API.
 
 The Hydra specification defines operations at two levels~\cite[§5]{hydra}:
 
@@ -108,9 +109,9 @@ The gateway's three-phase discovery strategy maps directly onto these levels, pl
 
 \subsubsection{Phase~1: Entrypoint Navigation (Awareness)}
 
-When the AI first calls \texttt{read\_hydra\_resource(uri: "/")}, the gateway fetches the entrypoint. This response contains the map of the API---links to each available collection (e.g., \texttt{"book":"/books"}, \texttt{"bookmark":"/bookmarks"})---but \textbf{no tools are registered at this stage}. The gateway also inspects the HTTP \texttt{Link} header for the \texttt{http://www.w3.org/ns/hydra/core\#apiDocumentation} relation, which points to the \texttt{docs.jsonld} document, and caches its URL for later use.
+When the AI first calls \texttt{read\_api\_resource(uri: "/")}, the gateway fetches the entrypoint. This response contains the map of the API---links to each available collection (e.g., \texttt{"book":"/books"}, \texttt{"bookmark":"/bookmarks"})---but \textbf{no tools are registered at this stage}. The gateway also inspects the HTTP \texttt{Link} header for the \texttt{http://www.w3.org/ns/hydra/core\#apiDocumentation} relation, which points to the \texttt{docs.jsonld} document, and caches its URL for later use.
 
-The entrypoint gives the agent \emph{awareness}---it knows what collections exist and can plan which to visit---but not yet \emph{capabilities}. The agent's only tool remains \texttt{read\_hydra\_resource}. This separation is deliberate: registering tools for all resource types at this stage would consume significant tokens in the model's context on every turn, regardless of whether the agent ever interacts with those resources.
+The entrypoint gives the agent \emph{awareness}---it knows what collections exist and can plan which to visit---but not yet \emph{capabilities}. The agent's only tool remains \texttt{read\_api\_resource}. This separation is deliberate: registering tools for all resource types at this stage would consume significant tokens in the model's context on every turn, regardless of whether the agent ever interacts with those resources.
 
 \subsubsection{Phase~2: Collection Navigation (CRUD and Search Discovery)}
 
@@ -129,7 +130,7 @@ If the user asks, ``Show me the books,'' the AI model sees the \texttt{"book":"/
 
 \begin{small}
 \begin{verbatim}
-tools/call(name: "read_hydra_resource",
+tools/call(name: "read_api_resource",
            arguments: { "uri": "/books" })
 \end{verbatim}
 \end{small}
@@ -144,77 +145,186 @@ If new tools were created, the gateway sends a \texttt{notifications/tools/list\
 
 \subsubsection{Phase~3: Inline Operation Overrides (Instance-Level State)}
 
-When the agent navigates to a specific resource or collection and the response contains \texttt{hydra:operation} nodes, the gateway registers these as tools that may differ from---or supplement---the class-level defaults discovered in Phase~2. For example, if a fetched order resource includes only \texttt{GET} and \texttt{PATCH} in its inline \texttt{hydra:operation}---omitting \texttt{DELETE}---an implementation could choose to remove or disable the \texttt{delete\_order} tool, reflecting the server's assertion that deletion is not available in the current state. The architecture prescribes that inline operations are authoritative; how exactly the tool set is reconciled (additive registration, replacement, or removal) is an implementation decision.
+When the agent navigates to a specific resource or collection and the response contains \texttt{hydra:operation} nodes, the gateway registers these as tools that may differ from---or supplement---the class-level defaults discovered in Phase~2. For example, if a fetched order resource includes only \texttt{GET} and \texttt{PATCH} in its inline \texttt{hydra:operation}---omitting \texttt{DELETE}---an implementation could choose to remove or disable the \texttt{delete\_order} tool, reflecting the server's assertion that deletion is not available in the current state. The design anticipates that inline operations are authoritative; how exactly the tool set is reconciled (additive registration, replacement, or removal) is an implementation decision.
 
-This phase is the most faithful to the HATEOAS principle: the server communicates exactly which transitions are valid for \emph{this} resource in \emph{this} state, and the gateway translates that signal into the agent's available tool set. Inline operations take precedence over class-level defaults because they represent the server's authoritative, state-dependent view.
+This phase is the most faithful to the HATEOAS principle: the server communicates exactly which transitions are valid for \emph{this} resource in \emph{this} state, and the gateway translates that signal into the agent's available tool set. Inline operations take precedence over class-level defaults because they represent the server's authoritative, state-dependent view. This phase is architecturally defined but has not yet been validated empirically; the evaluation in Section~5 exercises only Phases~1 and~2.
 
 \medskip
 
 Across all three phases, the same principle applies: Hydra's \texttt{hydra:supportedOperation} and \texttt{hydra:IriTemplate} (\emph{content-based} affordances) are translated into MCP \texttt{tools} (\emph{action-based} affordances), making them available to the AI only after they have been discovered.
 
-\subsection{Guiding the AI Agent: The System Prompt}
-
-The gateway architecture handles the mechanical translation of affordances, but the AI agent also needs behavioral guidance to navigate effectively. Rather than hardcoding API-specific knowledge (which would violate the discoverability principle), we use a lightweight system prompt that teaches the agent \emph{how} to discover, not \emph{what} to discover.
-
-The complete system prompt used in our implementation is reproduced below:
-
-\begin{quote}
-\small
-\emph{You are connected to an API through a hypermedia gateway. You discover what's available by navigating---never guess endpoints, field values, or schemas.}
-
-\textbf{Workflow:}
-\begin{enumerate}
-  \item Call \texttt{read\_hydra\_resource(uri: "/")} to discover the API. This is always your first step.
-  \item Follow links in the response to explore collections and resources.
-  \item New tools appear automatically as you navigate to a collection---use them when available.
-  \item Before creating or updating a resource, navigate to its collection first. This registers the typed tools and lets you understand the expected format and values.
-\end{enumerate}
-
-\textbf{Rules:}
-\begin{itemize}
-  \item Format is JSON-LD: field values may be URIs---always reuse exact values from responses you've read.
-  \item Never hardcode or assume URIs, field names, or enum values. Discover them.
-  \item Collections are paginated---look for navigation links in responses.
-\end{itemize}
-\end{quote}
-
-The prompt establishes three key principles: \textbf{navigate first} (always start from the entrypoint to discover the API's structure), \textbf{navigate before acting} (visit a collection before attempting to create or modify its resources, since this triggers tool registration), and \textbf{never guess} (all information must come from discovered responses). It tells the agent that tools ``appear automatically as you navigate,'' priming it to expect the progressive discovery that the gateway provides.
-
-This approach keeps the system prompt entirely generic---the same prompt works for any Hydra API the gateway connects to. The agent learns the API's specifics (available collections, field schemas, valid enum values) through navigation, not through prior instruction. This is consistent with the HATEOAS principle: the hypermedia controls in the responses are sufficient to drive the agent's interaction with the API.
-
 \subsection{Illustrative Interaction}
 
-To demonstrate the architecture in practice, we present a condensed agent transcript from our prototype connected to a Hydra API serving a book catalog (204 books, with search filters).
+To demonstrate the architecture in practice, we present a condensed agent transcript from our prototype connected to a Hydra API serving a book catalog (76 books, with search filters). No system prompt is provided---the agent's only guidance is the static tool's description: ``Navigate to a Hydra API resource by URI. Returns JSON-LD content and may discover new tools from hypermedia controls. Use this to explore the API: start with \texttt{"/"} to see the entrypoint, then follow links.''
 
-The user asks: ``Could you check if there's a book by Orwell in our Hydra API?'' The agent, guided only by the system prompt, proceeds as follows:
+The user asks: ``Could you check if there's a book by Orwell in our Hydra API?'' The agent proceeds as follows:
 
 \begin{enumerate}
-  \item \textbf{Phase~1:} The agent calls \texttt{read\_hydra\_resource(uri: "/")} and receives the entrypoint, learning that \texttt{/books} exists.
-  \item \textbf{Phase~2:} The agent calls \texttt{read\_hydra\_resource(uri: "/books")}. The gateway resolves the managed class (\texttt{Book}), fetches \texttt{docs.jsonld}, and registers \texttt{post\_book}, \texttt{get\_book}, \texttt{patch\_book}, \texttt{delete\_book}, and \texttt{search\_books}. The agent receives the collection and notices the search filter.
-  \item \textbf{Search:} The agent calls \texttt{read\_hydra\_resource(uri: "/books?author=Orwell")} and finds one result: ``The Lion and the Unicorn'' by George Orwell.
+  \item \textbf{Phase~1:} The agent calls \texttt{read\_api\_resource(uri: "/")} and receives the entrypoint, learning that \texttt{/books} exists.
+  \item \textbf{Phase~2:} The agent calls \texttt{read\_api\_resource(uri: "/books")}. The gateway resolves the managed class (\texttt{Book}), fetches \texttt{docs.jsonld}, and registers \texttt{post\_book}, \texttt{get\_book}, \texttt{patch\_book}, \texttt{delete\_book}, and \texttt{search\_books}. The agent receives the collection and notices the search filter.
+  \item \textbf{Search:} The agent calls the newly discovered \texttt{search\_books(author: "Orwell")} tool and finds one result: ``The Lion and the Unicorn'' by George Orwell.
 \end{enumerate}
 
-The user then asks to add another Orwell book. The agent---now equipped with the \texttt{post\_book} tool discovered in step~2---calls it directly with the appropriate fields, successfully creating the resource in a single tool call. At no point was the agent given prior knowledge of the API's schema, field names, or available operations; everything was discovered through navigation.
+The user then asks to add another Orwell book. The agent---now equipped with the \texttt{post\_book} tool discovered in step~2---calls it directly with the appropriate fields, successfully creating the resource in a single tool call. At no point was the agent given prior knowledge of the API's schema, field names, or available operations; in our evaluation, the tool description proved sufficient to bootstrap discovery, and everything else was learned through navigation.
 
 \section{Evaluation}
-% TODO: Add empirical evaluation. Possible directions:
-% - Token consumption comparison: static tool-per-endpoint vs. dynamic gateway (eager vs. lazy bootstrapping)
-% - Task success rates: can the agent complete CRUD + search workflows across different Hydra APIs?
-% - Qualitative comparison with the static and single-generic-tool approaches
-% - Measure how many turns/tool-calls the agent needs to complete representative tasks
-% - Test with multiple LLMs to assess prompt robustness
 
-\textbf{TODO:} This section will present an empirical evaluation of the proposed architecture.
+To validate the dynamic gateway architecture, we conducted a comparative evaluation against a static OpenAPI baseline. We measured task completion rates, token consumption, and tool-schema overhead across 19~tasks of increasing complexity, using two LLMs via the same MCP client.
+
+\subsection{Setup}
+
+We evaluate two conditions:
+
+\begin{itemize}
+  \item \textbf{Condition~A (Hydra gateway):} Our dynamic gateway, starting with one static tool (\texttt{read\_api\_resource}) and lazily discovering typed tools at runtime.
+  \item \textbf{Condition~B (OpenAPI static):} A conventional MCP server generated from the same API's OpenAPI specification, exposing all 19~operations as pre-registered tools from the start.
+\end{itemize}
+
+Both conditions connect to the same upstream API: a Hydra-powered book catalog built with API Platform, seeded with 76~books across multiple authors, with reviews as sub-resources, bookmarks, parchments, and users. The API exposes search filters on title, author, and condition. Each run resets the database to a deterministic fixture state before execution.
+
+We use two models---Gemini~2.5~Flash and GPT-5~mini---accessed through the OpenCode CLI (GitHub Copilot) in headless mode, with 3~runs per task per model per condition. Neither condition uses a system prompt. Under Condition~A, the static tool's own description (``Navigate to a Hydra API resource by URI\ldots{} start with \texttt{"/"} to see the entrypoint, then follow links'') provides sufficient guidance for the agent to bootstrap discovery without additional instructions.
+
+\subsection{Task Design}
+
+The 19~tasks are organized into four tiers of increasing difficulty. Full task definitions are given in Appendix~\ref{appendix:tasks}.
+
+\begin{itemize}
+  \item \textbf{Tier~1 --- Single-resource read} (5~tasks): Retrieving information from the collection or a specific resource. Includes one negative-capability task (T1.5) asking for a filter the API does not support.
+  \item \textbf{Tier~2 --- Single mutation} (6~tasks): Creating, updating, or deleting a resource via a single operation. Includes two negative-capability tasks (T2.5, T2.6) testing whether the agent recognizes missing or read-only fields.
+  \item \textbf{Tier~3 --- Multi-step reasoning} (4~tasks): Tasks requiring multiple navigations and operations---e.g., searching by author, then updating each result's condition.
+  \item \textbf{Tier~4 --- Cross-collection and discovery stress} (4~tasks): Operations spanning multiple collections or requiring extensive exploration. Includes one negative-capability task (T4.4) testing whether users are read-only.
+\end{itemize}
+
+Goals are evaluated automatically: \texttt{api\_state} goals verify the database state via HTTP after the run; \texttt{response\_contains} and \texttt{response\_indicates\_limitation} goals check the agent's textual output against expected keywords.
+
+\subsection{Results}
+
+\subsubsection{Task Completion}
+
+Table~\ref{tab:completion} summarizes pass rates by tier and condition.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{l|cc|cc}
+\hline
+ & \multicolumn{2}{c|}{\textbf{Condition~A (Hydra)}} & \multicolumn{2}{c}{\textbf{Condition~B (OpenAPI)}} \\
+\textbf{Tier} & Gemini & GPT-5-mini & Gemini & GPT-5-mini \\
+\hline
+1 --- Read         & 80.0\% & 86.7\% & 84.0\% & 80.0\% \\
+2 --- Mutation     & 94.4\% & 88.9\% & 96.7\% & 100.0\% \\
+3 --- Multi-step   & 100.0\% & 100.0\% & 100.0\% & 100.0\% \\
+4 --- Cross-coll.  & 91.7\% & 75.0\% & 80.0\% & 75.0\% \\
+\hline
+\textbf{Overall}   & \textbf{91.2\%} & \textbf{87.7\%} & 90.5\% & 89.5\% \\
+\hline
+\end{tabular}
+\caption{Pass rates by tier and condition ($k=3$ runs per task per model).}
+\label{tab:completion}
+\end{table}
+
+On \textbf{positive-capability tasks} (15~tasks excluding negative-capability tests), both models achieve \textbf{100\%} pass rate under both conditions ($n{=}90$ runs per condition)---every CRUD operation, search, multi-step workflow, and cross-collection task succeeds in all runs.
+
+The overall gap is driven entirely by \textbf{negative-capability tasks}, where the agent must recognize that an operation is impossible and report a limitation rather than attempting it. These tasks are inherently difficult for both conditions: T1.5 (no publication-year filter) achieves 0--33\% across all configurations; T4.4 (read-only users) is 0--67\%. Negative capability is a model-level challenge, not an architectural one.
+
+\subsubsection{Token Consumption and Schema Overhead}
+
+On this 19-operation API, Condition~A uses approximately 2$\times$ more total tokens than Condition~B per task, driven by navigation overhead: the agent must first read the entrypoint and a collection before acting, adding 2--3~tool calls to every task.
+
+However, the \emph{composition} of token usage differs dramatically. We estimate tool-schema overhead---the tokens consumed by injecting tool definitions into the model's context on each turn---using the measured tool counts per turn:
+
+\begin{itemize}
+  \item \textbf{Condition~B:} All 19~tool schemas (~1,685~tokens) are injected into every turn, consuming a mean of \textbf{77.2\%} of input tokens on schema alone.
+  \item \textbf{Condition~A:} Starting with 1~tool (~51~tokens) and growing lazily, schema overhead is a mean of \textbf{2.0\%} of input tokens.
+\end{itemize}
+
+This overhead scales linearly with API size. For a 200-operation API, Condition~B would inject approximately 17,800~schema tokens per turn regardless of the task, while Condition~A would still begin at~51 and only load the tools the agent actually needs. The gateway's lazy discovery ensures that context budget is spent on task-relevant data rather than unused tool definitions---and as API size grows, the static baseline's per-turn schema cost eventually exceeds the gateway's navigation overhead, inverting the token trade-off.
+
+\subsubsection{Discussion}
+
+The evaluation demonstrates that dynamic hypermedia-driven discovery achieves task-completion parity with a static OpenAPI baseline, while fundamentally changing how context is allocated. The Hydra gateway trades upfront navigation cost (2--3~extra tool calls) for a tool set that scales with task scope rather than API surface area. The architecture relies on the MCP \texttt{notifications/tools/list\_changed} mechanism; correct client-side handling of this notification is essential for dynamic discovery to function.
+
+One design asymmetry is worth noting: Condition~A's single tool description encodes navigational guidance (``start with \texttt{"/"}\ldots{} then follow links''), while Condition~B's tool descriptions are individual operation schemas with no comparable framing. This reflects a genuine difference in how the two approaches convey interface semantics, not an experimental confound.
+
+The MCP specification defines an optional \texttt{instructions} field in the server's initialization response, which clients \textsc{may} inject into the model's system prompt~\cite{mcp-overview}. Our gateway defines such instructions---a workflow (``navigate first, then act'') and rules (``never guess URIs or field values; reuse exact values from responses'')---but the evaluation client (OpenCode) does not honor this field. All reported results reflect the tool description alone.
+
+\subsubsection{Threats to Validity}
+
+\textbf{Internal.} All tasks were evaluated against a single Hydra API (a book catalog). The API does not exercise Phase~3 inline operation overrides in its current configuration---all operations are class-level. Phase~3 remains an architectural proposal validated only by design analysis, not by empirical evidence. Results may differ for APIs with state-dependent per-instance operations. The 3-run sample size per task limits statistical power; observed pass rates on negative-capability tasks are noisy.
+
+\textbf{External.} We tested two models from different providers. Results may not generalize to models with weaker tool-calling or instruction-following capabilities. The evaluation uses a single MCP client (OpenCode); other clients may handle \texttt{tools/list\_changed} notifications differently, affecting discovery reliability.
+
+\textbf{Construct.} Token overhead estimates for Condition~B use a fixed per-tool token count measured from the actual OpenAPI MCP server. The 200-operation extrapolation assumes linear scaling, which holds for tool schemas but may not account for model-level context management strategies (e.g., tool summarization).
 
 \section{Conclusion}
 
-This research addresses a problem in the integration of AI agents with hypermedia APIs.
+In our evaluation, AI agents interacted with a hypermedia API as effectively as with static OpenAPI endpoints---achieving \textbf{100\%} task completion on all 15 positive-capability tasks across two models ($k{=}3$ runs per task, $n{=}90$ per condition) while reducing tool-schema overhead from 77\% to 2\% of input context, with no system prompt required.
 
-We have shown that static mappings of APIs to AI \texttt{tools} are insufficient for navigating stateful, discoverable systems. Our analysis of other hypotheses shows that such approaches can conflict with either the hypermedia paradigm (HATEOAS) or the AI-agent protocol (MCP).
+The key architectural insight---separating navigation from mutation so that the tool set grows with task scope---yields a 38$\times$ reduction in schema overhead (from 77\% to 2\% of input context) at the cost of 2--3 additional navigation calls per task.
 
-Our contribution is the \textbf{Dynamic Gateway Architecture}, an integration pattern. This design respects the philosophies of both protocols and accommodates the operational model of the LLM. The gateway operates through three discovery phases: navigating the entrypoint to give the agent awareness of the API's structure, lazily registering typed CRUD and search tools when the agent visits a collection by cross-referencing its response with the API's \texttt{docs.jsonld}, and honoring inline operation overrides that reflect per-resource state. This lazy approach ensures that the agent's tool set scales with its task scope rather than the API's total surface area. Paired with a generic, API-agnostic system prompt that teaches the agent \emph{how} to discover rather than \emph{what} to discover, this architecture enables AI agents to interact with any Hydra API without prior knowledge of its structure. The agent's available actions change in real-time, mirroring the state-dependent affordances of the underlying hypermedia API---bridging the two protocols without violating the constraints of either.
+The main limitation is navigation overhead: the agent must visit the entrypoint and a collection before acting, roughly doubling total token consumption compared to the static baseline on this 19-operation API. However, this overhead is fixed per collection visited, while the static baseline's schema cost scales linearly with API size---for sufficiently large APIs, the dynamic approach becomes more token-efficient overall. The architecture also depends on correct client-side handling of \texttt{notifications/tools/list\_changed}, which not all MCP clients may implement reliably.
+
+Phase~3 (inline operation overrides) is architecturally defined but unvalidated; testing against APIs with state-dependent per-instance operations is the most immediate priority for future work. Additional directions include evaluating with a broader set of models and measuring the crossover point at which lazy discovery becomes more token-efficient than static tool injection.
 
 \bibliographystyle{unsrturl}
 \bibliography{references}
+
+\appendix
+
+\section{Evaluation Task Definitions}
+\label{appendix:tasks}
+
+Table~\ref{tab:tasks} lists all 19~evaluation tasks. Tasks marked with~$\dagger$ are negative-capability tests where the expected outcome is that the agent reports a limitation. Goal types: \textbf{RC}~= response contains keywords; \textbf{RL}~= response indicates limitation; \textbf{AS}~= API state verified via HTTP; \textbf{ASC}~= chained API state (multi-step HTTP verification).
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{clp{7.2cm}l}
+\hline
+\textbf{ID} & \textbf{Tier} & \textbf{Prompt (abbreviated)} & \textbf{Goal} \\
+\hline
+T1.1 & 1 & Is there a book by Dan Simmons? & RC \\
+T1.2 & 1 & What is the rating of `Hyperion'? & RC \\
+T1.3 & 1 & Show all books by Gordon R.\ Dickson. & RC \\
+T1.4 & 1 & How many reviews does `Hyperion' have? & RC \\
+T1.5$^\dagger$ & 1 & Find all books published after 2000 (API only). & RL \\
+\hline
+T2.1 & 2 & Add a book with Open Library ID OL1168083M, condition `new'. & AS \\
+T2.2 & 2 & Delete `Dragons of Deltora' by Emily Rodda. & AS \\
+T2.3 & 2 & Change the condition of `Hyperion' to `new'. & AS \\
+T2.4 & 2 & Write a review for `Hyperion': ``A masterpiece\ldots'', rating~5. & ASC \\
+T2.5$^\dagger$ & 2 & Add a book `Brave New World' by Aldous Huxley. & RL \\
+T2.6$^\dagger$ & 2 & Change the author of `Hyperion' to `Daniel Simmons'. & RL \\
+\hline
+T3.1 & 3 & Find all books by Vera Strange, update their condition to `new'. & AS \\
+T3.2 & 3 & Check if Philip F.\ Nowlan exists; if not, add OL37044569M. & RC \\
+T3.3 & 3 & Find `Hyperion', read its reviews, report the highest-rated. & RC \\
+T3.4 & 3 & Bookmark `Hyperion'. & RC \\
+\hline
+T4.1 & 4 & List all available collections. & RC \\
+T4.2 & 4 & Add book OL35227850M (new), then write a review for it. & AS \\
+T4.3 & 4 & Search books by Gordon R.\ Dickson, summarize reviews. & RC \\
+T4.4$^\dagger$ & 4 & Create a new user named `Alice'. & RL \\
+\hline
+\end{tabular}
+\caption{Evaluation tasks by tier. $\dagger$~= negative capability (agent should report limitation).}
+\label{tab:tasks}
+\end{table}
+
+\section{Evaluation Protocol}
+\label{appendix:protocol}
+
+Each evaluation run follows a deterministic protocol:
+
+\begin{enumerate}
+  \item \textbf{Fixture reset:} The upstream API database is reloaded with a fixed seed (\texttt{FIXTURES\_SEED=42}, 76~books), ensuring identical starting state across all runs.
+  \item \textbf{MCP session cache cleared:} Any persisted affordance state from prior runs is removed.
+  \item \textbf{Agent execution:} The MCP client (OpenCode) is launched in headless mode with the task prompt, a 120-second timeout, and the target model. No system prompt is used in either condition.
+  \item \textbf{Gateway logging:} The MCP gateway logs all request/response pairs as NDJSON, capturing tool call sequences, tool-list snapshots at each \texttt{tools/list} exchange, and error events.
+  \item \textbf{Goal evaluation:} Goals are checked automatically after the run completes. \texttt{api\_state} goals issue HTTP requests to the upstream API and verify response fields; \texttt{response\_contains} and \texttt{response\_indicates\_limitation} goals match the agent's textual output against keyword lists.
+  \item \textbf{Result persistence:} Each run produces a JSON file containing the prompt, full response, token usage, tool call trace, gateway metrics, and goal evaluation result.
+\end{enumerate}
+
+The analyzer script re-evaluates text-based goals offline against current task definitions, allowing keyword lists to be refined without re-running experiments. API-state goals retain their original (baked) evaluation since the database state is ephemeral.
 
 \end{document}

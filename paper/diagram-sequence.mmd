@@ -5,7 +5,7 @@ sequenceDiagram
 
     rect rgb(235, 245, 255)
     Note over Agent,API: Phase 1 — Entrypoint (Awareness)
-    Agent->>Gateway: read_hydra_resource({uri: "/"})
+    Agent->>Gateway: read_api_resource({uri: "/"})
     Gateway->>API: GET /
     API-->>Gateway: Entrypoint + Link: docs.jsonld
     Gateway-->>Agent: Collection links (/books, /reviews, …)
@@ -13,7 +13,7 @@ sequenceDiagram
 
     rect rgb(235, 255, 235)
     Note over Agent,API: Phase 2 — Collection Visit (Tool Discovery)
-    Agent->>Gateway: read_hydra_resource({uri: "/books"})
+    Agent->>Gateway: read_api_resource({uri: "/books"})
     Gateway->>API: GET /books
     API-->>Gateway: hydra:Collection
     Gateway->>API: GET /docs.jsonld

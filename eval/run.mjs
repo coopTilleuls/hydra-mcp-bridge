@@ -25,7 +25,6 @@ import {
   PROJECT_ROOT, DEMO_API_DIR, EVAL_LOG_DIR, RESULTS_DIR,
   MCP_CACHE_DIR, MODELS, GATEWAY_CLIENT_SLUG,
   TEST_HYDRA_DIR, TEST_OPENAPI_DIR, modelSlug,
-  SYSTEM_PROMPT_PATH,
 } from './config.mjs';
 import { runTask } from './adapters/opencode.mjs';
 
@@ -351,9 +350,6 @@ async function main() {
   const isConditionA = opts.condition === 'A';
   const conditionLabel = isConditionA ? 'A (Hydra gateway)' : 'B (OpenAPI static)';
   const cwd = isConditionA ? TEST_HYDRA_DIR : TEST_OPENAPI_DIR;
-  const systemPrompt = isConditionA
-    ? readFileSync(SYSTEM_PROMPT_PATH, 'utf-8')
-    : '';
 
   // Filter tasks
   let tasks = TASKS;
@@ -419,7 +415,7 @@ async function main() {
         console.log(`  Running opencode --model ${model}...`);
         let cliResult;
         try {
-          cliResult = await runTask(task.prompt, systemPrompt, {
+          cliResult = await runTask(task.prompt, '', {
             timeoutMs: opts.timeoutMs,
             cwd,
             model,

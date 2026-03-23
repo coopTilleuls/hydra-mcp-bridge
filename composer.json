@@ -7,6 +7,14 @@
         {
             "type": "path",
             "url": "/home/soyuka/forks/core"
+        },
+        {
+            "type": "path",
+            "url": "/home/soyuka/forks/mcp/php-sdk"
+        },
+        {
+            "type": "path",
+            "url": "/home/soyuka/forks/mcp/mcp-bundle"
         }
     ],
     "require": {

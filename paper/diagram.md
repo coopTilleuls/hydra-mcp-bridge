@@ -15,17 +15,17 @@ sequenceDiagram
 
     rect rgb(235, 245, 255)
     Note over Agent,API: Phase 1 — Entrypoint Navigation (Awareness)
-    Agent->>Gateway: tools/call("read_hydra_resource", {uri: "/"})
+    Agent->>Gateway: tools/call("read_api_resource", {uri: "/"})
     Gateway->>API: GET /
     API-->>Gateway: Entrypoint JSON-LD + Link: <docs.jsonld>
     Note over Gateway: Cache docs.jsonld URL
     Gateway-->>Agent: Entrypoint content (collection links)
-    Note over Agent: Available tools: read_hydra_resource
+    Note over Agent: Available tools: read_api_resource
     end
 
     rect rgb(235, 255, 235)
     Note over Agent,API: Phase 2 — Collection Navigation (CRUD + Search Discovery)
-    Agent->>Gateway: tools/call("read_hydra_resource", {uri: "/books"})
+    Agent->>Gateway: tools/call("read_api_resource", {uri: "/books"})
     Gateway->>API: GET /books
     API-->>Gateway: hydra:Collection (members, hydra:search)
     Note over Gateway: Resolve managed class<br/>(memberAssertion or @context)
@@ -39,7 +39,7 @@ sequenceDiagram
 
     rect rgb(255, 245, 235)
     Note over Agent,API: Phase 3 — Inline Operation Overrides
-    Agent->>Gateway: tools/call("read_hydra_resource", {uri: "/orders/42"})
+    Agent->>Gateway: tools/call("read_api_resource", {uri: "/orders/42"})
     Gateway->>API: GET /orders/42
     API-->>Gateway: Resource with hydra:operation (GET, PATCH only)
     Note over Gateway: Register inline operations<br/>(may differ from class-level defaults)
@@ -65,7 +65,7 @@ graph TD
     end
 
     subgraph "MCP Gateway"
-        B[read_hydra_resource<br/><i>static tool</i>]
+        B[read_api_resource<br/><i>static tool</i>]
         C[Dynamic Tool Registry]
         D[Hydra Response Parser]
         E[Affordance Store<br/><i>per-session</i>]
