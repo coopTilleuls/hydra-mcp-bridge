@@ -13,3 +13,9 @@
 /phpunit.xml
 /.phpunit.cache/
 ###< phpunit/phpunit ###
+
+###> agent tooling (local-only) ###
+/CLAUDE.md
+/.mcp.json
+.claude/
+###< agent tooling (local-only) ###
