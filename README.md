@@ -1,6 +1,7 @@
-# Hydra MCP Discovery Gateway
+# Hydra MCP Bridge
 
-A dynamic [Model Context Protocol (MCP)](https://modelcontextprotocol.io) gateway that bridges
+A Hydra MCP bridge for agentic tool discovery. A dynamic
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io) gateway that bridges
 Hydra/HATEOAS APIs with MCP clients. It exposes a single static tool
 (`read_hydra_resource`) and **discovers additional tools at runtime** by parsing Hydra
 hypermedia controls (JSON-LD), as the agent navigates the API.
