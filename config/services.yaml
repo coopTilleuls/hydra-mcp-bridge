@@ -22,14 +22,14 @@ services:
             - '../src/Mcp/RestoringRegistryDecorator.php'
 
     # Decorate the MCP registry to lazily restore dynamic tools from persistent storage.
-    # This must decorate mcp.registry (before the TraceableRegistry in debug mode).
+    # This must decorate mcp.server.default.registry (before the TraceableRegistry in debug mode).
     App\Mcp\RestoringRegistryDecorator:
-        decorates: 'mcp.registry'
+        decorates: 'mcp.server.default.registry'
         decoration_priority: 10
         arguments:
             $inner: '@.inner'
 
-    Mcp\Capability\RegistryInterface: '@mcp.registry'
+    Mcp\Capability\RegistryInterface: '@mcp.server.default.registry'
 
     App\JsonLd\HttpClientDocumentLoader:
         arguments:
@@ -42,7 +42,7 @@ services:
 
     App\Mcp\AffordanceStore:
         arguments:
-            $sessionStore: '@mcp.session.store'
+            $sessionStore: '@mcp.server.default.session.store'
 
     App\Mcp\DynamicToolRegistry:
         arguments:

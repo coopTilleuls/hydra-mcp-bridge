@@ -62,6 +62,7 @@ final class DynamicToolRegistry
 
         $tool = new Tool(
             name: $affordance->name,
+            title: null,
             inputSchema: $affordance->inputSchema,
             description: $affordance->description,
             annotations: null,

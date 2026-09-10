@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Mcp;
 
-use Mcp\Capability\Discovery\DiscoveryState;
 use Mcp\Capability\Registry\PromptReference;
 use Mcp\Capability\Registry\ResourceReference;
 use Mcp\Capability\Registry\ResourceTemplateReference;
@@ -12,7 +11,7 @@ use Mcp\Capability\Registry\ToolReference;
 use Mcp\Capability\RegistryInterface;
 use Mcp\Schema\Page;
 use Mcp\Schema\Prompt;
-use Mcp\Schema\Resource;
+use Mcp\Schema\ResourceDefinition;
 use Mcp\Schema\ResourceTemplate;
 use Mcp\Schema\Tool;
 
@@ -52,41 +51,66 @@ final class RestoringRegistryDecorator implements RegistryInterface
         return $this->inner->hasTools();
     }
 
-    public function registerTool(Tool $tool, callable|array|string $handler, bool $isManual = false): void
+    public function registerTool(Tool $tool, callable|array|string $handler): ToolReference
     {
-        $this->inner->registerTool($tool, $handler, $isManual);
+        return $this->inner->registerTool($tool, $handler);
     }
 
-    public function registerResource(Resource $resource, callable|array|string $handler, bool $isManual = false): void
+    public function registerResource(ResourceDefinition $resource, callable|array|string $handler): ResourceReference
     {
-        $this->inner->registerResource($resource, $handler, $isManual);
+        return $this->inner->registerResource($resource, $handler);
     }
 
-    public function registerResourceTemplate(ResourceTemplate $template, callable|array|string $handler, array $completionProviders = [], bool $isManual = false): void
+    public function registerResourceTemplate(ResourceTemplate $template, callable|array|string $handler, array $completionProviders = []): ResourceTemplateReference
     {
-        $this->inner->registerResourceTemplate($template, $handler, $completionProviders, $isManual);
+        return $this->inner->registerResourceTemplate($template, $handler, $completionProviders);
     }
 
-    public function registerPrompt(Prompt $prompt, callable|array|string $handler, array $completionProviders = [], bool $isManual = false): void
+    public function registerPrompt(Prompt $prompt, callable|array|string $handler, array $completionProviders = []): PromptReference
     {
-        $this->inner->registerPrompt($prompt, $handler, $completionProviders, $isManual);
+        return $this->inner->registerPrompt($prompt, $handler, $completionProviders);
     }
 
-    public function clear(): void
+    public function unregisterTool(string $name): void
     {
-        $this->restored = false;
-        $this->inner->clear();
+        $this->inner->unregisterTool($name);
     }
 
-    public function getDiscoveryState(): DiscoveryState
+    public function unregisterResource(string $uri): void
     {
-        return $this->inner->getDiscoveryState();
+        $this->inner->unregisterResource($uri);
     }
 
-    public function setDiscoveryState(DiscoveryState $state): void
+    public function unregisterResourceTemplate(string $uriTemplate): void
     {
-        $this->restored = false;
-        $this->inner->setDiscoveryState($state);
+        $this->inner->unregisterResourceTemplate($uriTemplate);
+    }
+
+    public function unregisterPrompt(string $name): void
+    {
+        $this->inner->unregisterPrompt($name);
+    }
+
+    public function hasTool(string $name): bool
+    {
+        $this->restoreIfNeeded();
+
+        return $this->inner->hasTool($name);
+    }
+
+    public function hasResource(string $uri): bool
+    {
+        return $this->inner->hasResource($uri);
+    }
+
+    public function hasResourceTemplate(string $uriTemplate): bool
+    {
+        return $this->inner->hasResourceTemplate($uriTemplate);
+    }
+
+    public function hasPrompt(string $name): bool
+    {
+        return $this->inner->hasPrompt($name);
     }
 
     public function hasResources(): bool
