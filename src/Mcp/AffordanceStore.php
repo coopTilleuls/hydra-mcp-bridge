@@ -25,11 +25,14 @@ final class AffordanceStore implements ResetInterface
     private const KEY_AFFORDANCES = 'hydra.affordances';
     private const KEY_DOCS_URL = 'hydra.docs_url';
     private const KEY_DOCS_CACHE = 'hydra.docs_cache';
+    private const KEY_ENTRYPOINT_LINKS = 'hydra.entrypoint_links';
 
     /** @var array<string, array<string, mixed>> in-memory cache (for stdio / same-process reads) */
     private array $affordancesCache = [];
     private ?string $docsUrlCache = null;
     private ?array $docsCacheCache = null;
+    /** @var array<string, string>|null */
+    private ?array $entrypointLinksCache = null;
 
     public function __construct(
         private readonly SessionStoreInterface $sessionStore,
@@ -67,16 +70,11 @@ final class AffordanceStore implements ResetInterface
 
     public function save(SessionInterface $session, StoredAffordance $affordance): void
     {
-        $data = $session->get(self::KEY_AFFORDANCES, []);
-
-        // Avoid duplicates
-        foreach ($data as $entry) {
-            if ($entry['name'] === $affordance->name) {
-                return;
-            }
-        }
-
         $entry = get_object_vars($affordance);
+        $data = array_values(array_filter(
+            $session->get(self::KEY_AFFORDANCES, []),
+            static fn (array $stored): bool => $stored['name'] !== $affordance->name,
+        ));
         $data[] = $entry;
 
         $session->set(self::KEY_AFFORDANCES, $data);
@@ -101,6 +99,29 @@ final class AffordanceStore implements ResetInterface
         }
 
         return $session->get(self::KEY_DOCS_URL);
+    }
+
+    /**
+     * @param array<string, string> $links entrypoint link name => collection IRI
+     */
+    public function saveEntrypointLinks(SessionInterface $session, array $links): void
+    {
+        $session->set(self::KEY_ENTRYPOINT_LINKS, $links);
+        $this->entrypointLinksCache = $links;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    public function getEntrypointLinks(?SessionInterface $session): ?array
+    {
+        if (null !== $this->entrypointLinksCache) {
+            return $this->entrypointLinksCache;
+        }
+
+        $session ??= $this->resolveSession();
+
+        return $session?->get(self::KEY_ENTRYPOINT_LINKS);
     }
 
     public function saveDocsCache(SessionInterface $session, array $expandedDocs): void
@@ -161,6 +182,7 @@ final class AffordanceStore implements ResetInterface
         $this->affordancesCache = [];
         $this->docsUrlCache = null;
         $this->docsCacheCache = null;
+        $this->entrypointLinksCache = null;
     }
 
     /**

@@ -15,6 +15,7 @@ use App\Mcp\DiscoveryModeResolver;
 use App\Mcp\DynamicToolRegistry;
 use App\Mcp\HydraResponseParser;
 use App\Mcp\ResourceDescriber;
+use App\Mcp\StoredAffordance;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\Notification\ToolListChangedNotification;
 use Mcp\Schema\Result\CallToolResult;
@@ -69,18 +70,23 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
         }
 
         $affordances = [];
+        $entrypointLinks = $this->affordanceStore->getEntrypointLinks($session);
 
         if ($this->isEntrypoint($compactJsonLd)) {
-            // Phase 1: cache docs.jsonld URL only — no tool registration
+            // Phase 1: cache docs.jsonld URL and the entrypoint links — no tool registration
             $this->cacheDocsUrl($session, $response);
+            $entrypointLinks = $this->parser->entrypointLinks($compactJsonLd);
+            $this->affordanceStore->saveEntrypointLinks($session, $entrypointLinks);
         } elseif ($this->isCollection($expanded)) {
             // Phase 2: collection visit — discover CRUD tools for the managed class
-            $affordances = $this->discoverFromCollection($session, $response, $expanded, $compactJsonLd);
+            $expandedDocs = $this->getOrFetchDocs($session, $response);
+            $entrypointLinks ??= $this->fetchEntrypointLinks($session, $expandedDocs);
+            $affordances = $this->discoverFromCollection($expanded, $compactJsonLd, $expandedDocs, $entrypointLinks ?? []);
         }
 
         // Discover inline affordances (hydra:search, hydra:operation) — always
         if (!$expanded->isEmpty()) {
-            $inline = $this->parser->extractAffordances($expanded, $compactJsonLd);
+            $inline = $this->parser->extractAffordances($expanded, $compactJsonLd, $entrypointLinks ?? []);
             $affordances = array_merge($affordances, $inline);
         }
 
@@ -151,9 +157,11 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
     /**
      * Phase 2: On collection visit, resolve the managed class and register typed CRUD tools.
      *
-     * @return \App\Mcp\StoredAffordance[]
+     * @param array<string, string> $entrypointLinks
+     *
+     * @return StoredAffordance[]
      */
-    private function discoverFromCollection(SessionInterface $session, $response, JsonLdDocument $expanded, \stdClass $compactJsonLd): array
+    private function discoverFromCollection(JsonLdDocument $expanded, \stdClass $compactJsonLd, ?JsonLdDocument $expandedDocs, array $entrypointLinks): array
     {
         $managedClassId = $this->parser->resolveManagedClass($expanded, $compactJsonLd);
         if (null === $managedClassId) {
@@ -164,15 +172,41 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
 
         $this->logger->info('Resolved managed class for collection', ['class' => $managedClassId]);
 
-        // Get or fetch the expanded docs.jsonld
-        $expandedDocs = $this->getOrFetchDocs($session, $response);
         if (null === $expandedDocs) {
             return [];
         }
 
-        $collectionUri = $compactJsonLd->{'@id'} ?? '';
+        return $this->parser->extractClassOperations($expandedDocs, $managedClassId, $entrypointLinks);
+    }
 
-        return $this->parser->extractClassOperations($expandedDocs, $managedClassId, $collectionUri);
+    /**
+     * The entrypoint links, read from the entrypoint the documentation declares when it was not visited.
+     *
+     * @return array<string, string>|null
+     */
+    private function fetchEntrypointLinks(SessionInterface $session, ?JsonLdDocument $expandedDocs): ?array
+    {
+        $entrypoint = null !== $expandedDocs ? $this->parser->entrypointIri($expandedDocs) : null;
+        if (null === $entrypoint) {
+            return null;
+        }
+
+        try {
+            $compact = json_decode($this->hydraClient->request('GET', $entrypoint)->getContent(), false, 512, \JSON_THROW_ON_ERROR);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Failed to fetch the entrypoint', ['url' => $entrypoint, 'error' => $e->getMessage()]);
+
+            return null;
+        }
+
+        if (!$compact instanceof \stdClass) {
+            return null;
+        }
+
+        $links = $this->parser->entrypointLinks($compact);
+        $this->affordanceStore->saveEntrypointLinks($session, $links);
+
+        return $links;
     }
 
     /**

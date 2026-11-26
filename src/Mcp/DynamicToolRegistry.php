@@ -7,6 +7,8 @@ namespace App\Mcp;
 use Mcp\Capability\RegistryInterface;
 use Mcp\Schema\Tool;
 use Mcp\Server\Session\SessionInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Contracts\Service\ResetInterface;
 
 /**
@@ -27,26 +29,43 @@ final class DynamicToolRegistry implements ResetInterface
     public function __construct(
         private readonly RegistryInterface $registry,
         private readonly AffordanceStore $store,
+        private readonly LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
     /**
-     * Register a discovered affordance as a dynamic MCP tool.
+     * Register a discovered affordance as a dynamic MCP tool. An inline operation seen again on another
+     * resource is extended to that resource; any other existing tool is kept as is.
      *
      * @return bool true if a new tool was registered, false if it already existed
      */
     public function registerAffordance(StoredAffordance $affordance, SessionInterface $session): bool
     {
-        if (isset($this->registeredTools[$affordance->name])) {
-            return false;
+        $existing = $this->store->get($session, $affordance->name);
+
+        if (null === $existing) {
+            $this->store->save($session, $affordance);
+            $this->registerTool($affordance);
+
+            return true;
         }
 
-        // Persist config so the handler can look it up by tool name
-        $this->store->save($session, $affordance);
+        if (!$existing->sameBinding($affordance)) {
+            $this->logger->warning('A discovered tool has the name of another tool with a different target and is ignored', [
+                'name' => $affordance->name,
+                'existing' => get_object_vars($existing),
+                'ignored' => get_object_vars($affordance),
+            ]);
+        } elseif ([] !== $affordance->advertisedBy) {
+            $extended = array_reduce($affordance->advertisedBy, static fn (StoredAffordance $tool, string $resource): StoredAffordance => $tool->withAdvertisedBy($resource), $existing);
+            if ($extended !== $existing) {
+                $this->store->save($session, $extended);
+            }
+        }
 
-        $this->registerTool($affordance);
+        $this->registerTool($existing);
 
-        return true;
+        return false;
     }
 
     /**

@@ -474,6 +474,346 @@ class McpEndpointTest extends WebTestCase
         $this->assertStringContainsString('Hyperion', $this->extractText($own));
     }
 
+    public function testLinkBoundOperationTargetsTheGivenParent(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/']]);
+        $this->jsonRpc($sid, 2, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/hyperion/reviews']]);
+        $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/dune/reviews']]);
+
+        $tools = $this->getToolsByName($sid, 4);
+        $this->assertArrayHasKey('create_review', $tools);
+        $schema = $tools['create_review']['inputSchema'];
+        $this->assertArrayNotHasKey('uri', $schema['properties'], 'A link-bound tool takes its parent, not a target URI');
+        $this->assertEqualsCanonicalizing(['book', 'body', 'rating'], $schema['required']);
+
+        $created = $this->jsonRpc($sid, 5, 'tools/call', [
+            'name' => 'create_review',
+            'arguments' => ['book' => '/books/dune', 'body' => 'Spice must flow', 'rating' => 5],
+        ]);
+        $this->assertArrayNotHasKey('error', $created, json_encode($created));
+
+        $posts = array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0]));
+        $this->assertCount(1, $posts);
+        $this->assertSame('https://localhost/books/dune/reviews', $posts[0][1]);
+        $this->assertSame(['body' => 'Spice must flow', 'rating' => 5], json_decode($posts[0][2], true));
+    }
+
+    public function testEntrypointLinkMissingFromTheEntrypointIsNotBoundToTheVisitedCollection(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls, phantomEntrypointReview: true));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/']]);
+        $this->jsonRpc($sid, 2, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/hyperion/reviews']]);
+        $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/dune/reviews']]);
+
+        $this->jsonRpc($sid, 4, 'tools/call', ['name' => 'post_review', 'arguments' => ['body' => 'Spice must flow', 'rating' => 5]]);
+
+        $posts = array_column(array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0])), 1);
+        $this->assertNotContains('https://localhost/books/hyperion/reviews', $posts, 'A review meant for Dune must not land on Hyperion');
+    }
+
+    public function testLinkBoundOperationIsDiscoveredFromTheParentCollection(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->discoverTools($sid, '/books');
+
+        $tools = $this->getToolsByName($sid, 1);
+        $this->assertArrayHasKey('post_book', $tools);
+        $this->assertArrayNotHasKey('uri', $tools['post_book']['inputSchema']['properties'], 'An entrypoint link targets its fixed collection');
+        $this->assertArrayHasKey('create_review', $tools);
+
+        $this->jsonRpc($sid, 2, 'tools/call', ['name' => 'post_book', 'arguments' => ['title' => 'Ilium']]);
+        $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'create_review', 'arguments' => ['book' => '/books/hyperion', 'body' => 'Shrike', 'rating' => 4]]);
+
+        $posts = array_column(array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0])), 1);
+        $this->assertSame(['https://localhost/books', 'https://localhost/books/hyperion/reviews'], $posts);
+    }
+
+    public function testSearchOnSubCollectionTakesTheCollection(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->discoverTools($sid, '/books');
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/hyperion/reviews']]);
+
+        $tools = $this->getToolsByName($sid, 2);
+        $this->assertArrayNotHasKey('collection', $tools['search_books']['inputSchema']['properties'], 'An entrypoint collection is searched as is');
+        $this->assertContains('collection', $tools['search_reviews']['inputSchema']['required']);
+
+        $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'search_reviews', 'arguments' => ['collection' => '/books/dune/reviews', 'rating' => '5']]);
+
+        $this->assertSame(['GET', 'https://localhost/books/dune/reviews?rating=5'], \array_slice(end($calls), 0, 2));
+    }
+
+    public function testInlineOperationOnlyRunsOnResourcesThatAdvertisedIt(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books/hyperion']]);
+
+        $tools = $this->getToolsByName($sid, 2);
+        $this->assertContains('uri', $tools['lend_book']['inputSchema']['required']);
+
+        $refused = $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'lend_book', 'arguments' => ['uri' => '/books/dune']]);
+        $this->assertTrue(isset($refused['error']) || ($refused['result']['isError'] ?? false), 'Dune never advertised lend_book');
+
+        $this->jsonRpc($sid, 4, 'tools/call', ['name' => 'lend_book', 'arguments' => ['uri' => '/books/hyperion']]);
+
+        $posts = array_column(array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0])), 1);
+        $this->assertSame(['https://localhost/books/hyperion'], $posts);
+    }
+
+    public function testUriArgumentIsIgnoredByToolsThatDoNotDeclareIt(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->discoverTools($sid, '/books');
+
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'post_book', 'arguments' => ['title' => 'Ilium', 'uri' => '/books/hyperion/reviews']]);
+
+        $post = array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0]))[0];
+        $this->assertSame('https://localhost/books', $post[1]);
+        $this->assertSame(['title' => 'Ilium'], json_decode($post[2], true));
+    }
+
+    /**
+     * API Platform documentation once a sub-resource is described on its parent's link: #Book/reviews carries
+     * the collection operations. Earlier versions also listed #Entrypoint/review, absent from the entrypoint itself.
+     *
+     * @param list<array{0: string, 1: string, 2: string}> $calls
+     */
+    private function bookReviewsUpstream(array &$calls, bool $phantomEntrypointReview = false): MockHttpClient
+    {
+        $docsLink = ['response_headers' => ['link' => ['<https://localhost/docs.jsonld>; rel="http://www.w3.org/ns/hydra/core#apiDocumentation"']]];
+        $book = static fn (string $id, string $title, array $extra = []): string => json_encode([
+            '@context' => '/contexts/Book',
+            '@id' => "/books/{$id}",
+            '@type' => 'https://schema.org/Book',
+            'title' => $title,
+            'reviews' => "/books/{$id}/reviews",
+        ] + $extra);
+        $reviews = static fn (string $id): string => json_encode([
+            '@context' => '/contexts/Review',
+            '@id' => "/books/{$id}/reviews",
+            '@type' => 'hydra:Collection',
+            'hydra:totalItems' => 1,
+            'hydra:member' => [[
+                '@id' => "/books/{$id}/reviews/1",
+                '@type' => 'https://schema.org/Review',
+                'book' => "/books/{$id}",
+                'body' => 'Great',
+                'rating' => 5,
+            ]],
+            'hydra:search' => [
+                '@type' => 'hydra:IriTemplate',
+                'hydra:template' => "/books/{$id}/reviews{?rating}",
+                'hydra:mapping' => [['@type' => 'IriTemplateMapping', 'variable' => 'rating', 'property' => 'rating', 'required' => false]],
+            ],
+        ]);
+
+        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$calls, $docsLink, $book, $reviews, $phantomEntrypointReview): MockResponse {
+            $calls[] = [$method, $url, $options['body'] ?? ''];
+
+            if ('GET' !== $method) {
+                return new MockResponse('{"@id":"/created"}', ['http_code' => 201]);
+            }
+
+            return match ($url) {
+                'https://localhost/' => new MockResponse(json_encode([
+                    '@context' => '/contexts/Entrypoint',
+                    '@id' => '/',
+                    '@type' => 'Entrypoint',
+                    'book' => '/books',
+                ]), $docsLink),
+                'https://localhost/docs.jsonld' => new MockResponse(json_encode(self::bookReviewsDocs($phantomEntrypointReview))),
+                'https://localhost/contexts/Entrypoint' => new MockResponse(json_encode(['@context' => [
+                    '@vocab' => 'https://localhost/docs.jsonld#',
+                    'hydra' => 'http://www.w3.org/ns/hydra/core#',
+                    'book' => ['@id' => 'Entrypoint/book', '@type' => '@id'],
+                ]])),
+                'https://localhost/contexts/Book' => new MockResponse(json_encode(['@context' => [
+                    '@vocab' => 'https://localhost/docs.jsonld#',
+                    'hydra' => 'http://www.w3.org/ns/hydra/core#',
+                    'title' => 'https://schema.org/name',
+                    'reviews' => ['@id' => 'Book/reviews', '@type' => '@id'],
+                ]])),
+                'https://localhost/contexts/Review' => new MockResponse(json_encode(['@context' => [
+                    '@vocab' => 'https://localhost/docs.jsonld#',
+                    'hydra' => 'http://www.w3.org/ns/hydra/core#',
+                    'book' => ['@id' => 'Review/book', '@type' => '@id'],
+                    'body' => 'Review/body',
+                    'rating' => 'Review/rating',
+                ]])),
+                'https://localhost/books' => new MockResponse(json_encode([
+                    '@context' => '/contexts/Book',
+                    '@id' => '/books',
+                    '@type' => 'hydra:Collection',
+                    'hydra:totalItems' => 0,
+                    'hydra:member' => [],
+                    'hydra:search' => [
+                        '@type' => 'hydra:IriTemplate',
+                        'hydra:template' => '/books{?title}',
+                        'hydra:mapping' => [['@type' => 'IriTemplateMapping', 'variable' => 'title', 'property' => 'title', 'required' => false]],
+                    ],
+                ]), $docsLink),
+                'https://localhost/books/hyperion' => new MockResponse($book('hyperion', 'Hyperion', ['hydra:operation' => [
+                    ['@type' => 'hydra:Operation', 'hydra:method' => 'POST', 'hydra:title' => 'lendBook'],
+                ]]), $docsLink),
+                'https://localhost/books/dune' => new MockResponse($book('dune', 'Dune'), $docsLink),
+                'https://localhost/books/hyperion/reviews' => new MockResponse($reviews('hyperion'), $docsLink),
+                'https://localhost/books/dune/reviews', 'https://localhost/books/dune/reviews?rating=5' => new MockResponse($reviews('dune'), $docsLink),
+                default => new MockResponse('', ['http_code' => 404]),
+            };
+        }, 'https://localhost');
+    }
+
+    private static function bookReviewsDocs(bool $phantomEntrypointReview): array
+    {
+        $entrypointCollections = $phantomEntrypointReview ? ['Book', 'Review'] : ['Book'];
+        $entrypointLink = static fn (string $class): array => [
+            '@type' => 'SupportedProperty',
+            'property' => [
+                '@id' => '#Entrypoint/'.lcfirst($class),
+                '@type' => 'Link',
+                'domain' => '#Entrypoint',
+                'range' => [
+                    ['@id' => 'Collection'],
+                    ['owl:equivalentClass' => ['owl:onProperty' => ['@id' => 'hydra:member'], 'owl:allValuesFrom' => ['@id' => "https://schema.org/{$class}"]]],
+                ],
+                'supportedOperation' => [
+                    ['@type' => 'Operation', 'method' => 'GET', 'title' => "get{$class}Collection"],
+                    ['@type' => 'Operation', 'method' => 'POST', 'title' => "post{$class}", 'expects' => "https://schema.org/{$class}"],
+                ],
+            ],
+            'title' => "get{$class}Collection",
+            'readable' => true,
+            'writeable' => false,
+        ];
+        $property = static fn (string $id, string $label, string $range): array => [
+            '@type' => 'SupportedProperty',
+            'property' => ['@id' => $id, '@type' => 'rdf:Property', 'label' => $label, 'range' => $range],
+            'title' => $label,
+            'required' => true,
+            'readable' => true,
+            'writeable' => true,
+        ];
+
+        return [
+            '@context' => [
+                '@vocab' => 'https://localhost/docs.jsonld#',
+                'hydra' => 'http://www.w3.org/ns/hydra/core#',
+                'rdf' => 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'rdfs' => 'http://www.w3.org/2000/01/rdf-schema#',
+                'xsd' => 'http://www.w3.org/2001/XMLSchema#',
+                'owl' => 'http://www.w3.org/2002/07/owl#',
+                'label' => 'rdfs:label',
+                'domain' => ['@id' => 'rdfs:domain', '@type' => '@id'],
+                'range' => ['@id' => 'rdfs:range', '@type' => '@id'],
+                'supportedClass' => 'hydra:supportedClass',
+                'supportedProperty' => 'hydra:supportedProperty',
+                'supportedOperation' => 'hydra:supportedOperation',
+                'property' => 'hydra:property',
+                'title' => 'hydra:title',
+                'description' => 'hydra:description',
+                'method' => 'hydra:method',
+                'required' => 'hydra:required',
+                'readable' => 'hydra:readable',
+                'writeable' => 'hydra:writeable',
+                'expects' => ['@id' => 'hydra:expects', '@type' => '@id'],
+                'entrypoint' => ['@id' => 'hydra:entrypoint', '@type' => '@id'],
+                'Class' => 'hydra:Class',
+                'Link' => 'hydra:Link',
+                'Operation' => 'hydra:Operation',
+                'SupportedProperty' => 'hydra:SupportedProperty',
+                'Collection' => 'hydra:Collection',
+            ],
+            '@id' => '/docs.jsonld',
+            '@type' => 'hydra:ApiDocumentation',
+            'entrypoint' => '/',
+            'supportedClass' => [
+                [
+                    '@id' => 'https://schema.org/Book',
+                    '@type' => 'Class',
+                    'title' => 'Book',
+                    'supportedProperty' => [
+                        $property('https://schema.org/name', 'title', 'xsd:string'),
+                        [
+                            '@type' => 'SupportedProperty',
+                            'property' => [
+                                '@id' => '#Book/reviews',
+                                '@type' => 'Link',
+                                'domain' => 'https://schema.org/Book',
+                                'label' => 'reviews',
+                                'range' => 'https://schema.org/Review',
+                                'supportedOperation' => [
+                                    ['@type' => 'Operation', 'method' => 'GET', 'title' => 'getReviewCollection', 'description' => 'Retrieves the reviews of a Book.'],
+                                    ['@type' => 'Operation', 'method' => 'POST', 'title' => 'createReview', 'description' => 'Creates a Review of a Book.', 'expects' => 'https://schema.org/Review'],
+                                ],
+                            ],
+                            'title' => 'reviews',
+                            'required' => false,
+                            'readable' => true,
+                            'writeable' => false,
+                        ],
+                    ],
+                    'supportedOperation' => [
+                        ['@type' => 'Operation', 'method' => 'GET', 'title' => 'getBook'],
+                        ['@type' => 'Operation', 'method' => 'PATCH', 'title' => 'patchBook', 'expects' => 'https://schema.org/Book'],
+                        ['@type' => 'Operation', 'method' => 'DELETE', 'title' => 'deleteBook'],
+                    ],
+                ],
+                [
+                    '@id' => 'https://schema.org/Review',
+                    '@type' => 'Class',
+                    'title' => 'Review',
+                    'supportedProperty' => [
+                        [
+                            '@type' => 'SupportedProperty',
+                            'property' => ['@id' => '#Review/book', '@type' => 'Link', 'domain' => 'https://schema.org/Review', 'label' => 'book', 'range' => 'https://schema.org/Book'],
+                            'title' => 'book',
+                            'required' => true,
+                            'readable' => true,
+                            'writeable' => false,
+                        ],
+                        $property('#Review/body', 'body', 'xsd:string'),
+                        $property('#Review/rating', 'rating', 'xsd:integer'),
+                    ],
+                    'supportedOperation' => [
+                        ['@type' => 'Operation', 'method' => 'GET', 'title' => 'getReview'],
+                        ['@type' => 'Operation', 'method' => 'DELETE', 'title' => 'deleteReview'],
+                    ],
+                ],
+                [
+                    '@id' => '#Entrypoint',
+                    '@type' => 'Class',
+                    'title' => 'Entrypoint',
+                    'supportedProperty' => array_map($entrypointLink, $entrypointCollections),
+                ],
+            ],
+        ];
+    }
+
     public function testDynamicModeInitializeDescribesTypedTools(): void
     {
         $instructions = $this->initializeInstructions();
@@ -520,7 +860,7 @@ class McpEndpointTest extends WebTestCase
     // Test: T4.1 — Collection discovery via entrypoint
     // =========================================================================
 
-    public function testT4_1_CollectionDiscovery(): void
+    public function testT41CollectionDiscovery(): void
     {
         $sid = $this->initializeSession();
 
@@ -540,7 +880,7 @@ class McpEndpointTest extends WebTestCase
     // Test: T2.2 — Delete mutation
     // =========================================================================
 
-    public function testT2_2_DeleteMutation(): void
+    public function testT22DeleteMutation(): void
     {
         $sid = $this->initializeSession();
         $this->discoverTools($sid, '/books');
@@ -595,7 +935,7 @@ class McpEndpointTest extends WebTestCase
     // Test: T2.3 — Update mutation
     // =========================================================================
 
-    public function testT2_3_UpdateMutation(): void
+    public function testT23UpdateMutation(): void
     {
         $sid = $this->initializeSession();
         $this->discoverTools($sid, '/books');

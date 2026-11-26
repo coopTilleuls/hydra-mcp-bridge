@@ -7,6 +7,8 @@ namespace App\Mcp\Handler;
 use App\Mcp\AffordanceStore;
 use App\Mcp\DiscoveryMode;
 use App\Mcp\DiscoveryModeResolver;
+use App\Mcp\Iri;
+use App\Mcp\StoredAffordance;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\JsonRpc\Error;
 use Mcp\Schema\JsonRpc\Request;
@@ -73,7 +75,7 @@ final class DynamicToolRequestHandler implements RequestHandlerInterface
         }
     }
 
-    private function handleSearch(CallToolRequest $request, \App\Mcp\StoredAffordance $config): string
+    private function handleSearch(CallToolRequest $request, StoredAffordance $config): string
     {
         $query = [];
         foreach ($config->paramNames as $name) {
@@ -82,34 +84,86 @@ final class DynamicToolRequestHandler implements RequestHandlerInterface
             }
         }
 
-        return $this->hydraClient->request('GET', $config->uri, [
+        return $this->hydraClient->request('GET', $this->target($request, $config), [
             'query' => $query,
         ])->getContent();
     }
 
-    private function handleOperation(CallToolRequest $request, \App\Mcp\StoredAffordance $config): string
+    private function handleOperation(CallToolRequest $request, StoredAffordance $config): string
     {
         $contentType = 'PATCH' === $config->method ? 'application/merge-patch+json' : 'application/ld+json';
         $options = [
             'headers' => ['Content-Type' => $contentType],
         ];
+        $target = $this->target($request, $config);
 
         if ('DELETE' !== $config->method) {
-            // If the input schema has a "payload" property, use it as the body directly.
-            // Otherwise, the arguments ARE the properties (from docs.jsonld discovery).
-            $payload = $request->arguments['payload'] ?? null;
-            $body = null !== $payload ? $payload : ($request->arguments ?? []);
-            unset($body['uri']);
+            $arguments = $request->arguments ?? [];
+            $body = $config->declaresArgument('payload') && isset($arguments['payload'])
+                ? $arguments['payload']
+                : array_diff_key(
+                    array_intersect_key($arguments, (array) ($config->inputSchema['properties'] ?? [])),
+                    array_flip(['uri', 'payload', $config->parentParam ?? '']),
+                );
 
             if ([] !== $body) {
                 $options['json'] = $body;
             }
         }
 
-        // Use the agent-supplied URI directly when available (instance operations),
-        // otherwise fall back to the stored collection URI (POST).
-        $uri = isset($request->arguments['uri']) ? $request->arguments['uri'] : $config->uri;
+        return $this->hydraClient->request($config->method, $target, $options)->getContent();
+    }
 
-        return $this->hydraClient->request($config->method, $uri, $options)->getContent();
+    private function target(CallToolRequest $request, StoredAffordance $config): string
+    {
+        if (null !== $config->link) {
+            return $this->followLink($this->argument($request, $config->parentParam ?? ''), $config->link);
+        }
+
+        if ($config->declaresArgument('uri')) {
+            $uri = $this->argument($request, 'uri');
+            if ([] === $config->advertisedBy) {
+                return $uri;
+            }
+
+            foreach ($config->advertisedBy as $resource) {
+                if (Iri::path($resource) === Iri::path($uri)) {
+                    return $resource;
+                }
+            }
+
+            throw new \InvalidArgumentException(\sprintf('"%s" is only available on %s. Read "%s" first: run it only if that resource lists it in hydra:operation.', $request->name, implode(', ', $config->advertisedBy), $uri));
+        }
+
+        if ('search' === $config->type && $config->declaresArgument('collection')) {
+            return $this->argument($request, 'collection');
+        }
+
+        return $config->uri ?? throw new \LogicException(\sprintf('Tool "%s" has no target.', $request->name));
+    }
+
+    private function followLink(string $parent, string $link): string
+    {
+        $representation = json_decode($this->hydraClient->request('GET', $parent)->getContent(), false, 512, \JSON_THROW_ON_ERROR);
+        $target = $representation->{$link} ?? null;
+        if ($target instanceof \stdClass) {
+            $target = $target->{'@id'} ?? null;
+        }
+
+        if (!\is_string($target) || '' === $target) {
+            throw new \RuntimeException(\sprintf('"%s" has no "%s" link.', $parent, $link));
+        }
+
+        return $target;
+    }
+
+    private function argument(CallToolRequest $request, string $name): string
+    {
+        $value = $request->arguments[$name] ?? null;
+        if (!\is_string($value) || '' === $value) {
+            throw new \InvalidArgumentException(\sprintf('Argument "%s" is required.', $name));
+        }
+
+        return $value;
     }
 }

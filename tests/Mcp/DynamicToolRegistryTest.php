@@ -36,4 +36,18 @@ final class DynamicToolRegistryTest extends TestCase
         $restored->unregisterTool('read_vehicle');
         self::assertFalse($restored->hasTool('read_vehicle'));
     }
+
+    public function testInlineOperationSeenOnAnotherResourceExtendsItsAdvertisingResources(): void
+    {
+        $sessionStore = $this->createStub(SessionStoreInterface::class);
+        $store = new AffordanceStore($sessionStore, new RequestStack());
+        $dynamic = new DynamicToolRegistry(new Registry(), $store);
+        $session = new Session($sessionStore);
+        $lend = static fn (string $book): StoredAffordance => new StoredAffordance('lend_book', 'Lend', ['type' => 'object'], 'operation', method: 'POST', advertisedBy: [$book]);
+
+        self::assertTrue($dynamic->registerAffordance($lend('/books/1'), $session));
+        self::assertFalse($dynamic->registerAffordance($lend('/books/2'), $session));
+
+        self::assertSame(['/books/1', '/books/2'], $store->get($session, 'lend_book')->advertisedBy);
+    }
 }

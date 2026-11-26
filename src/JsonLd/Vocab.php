@@ -44,6 +44,7 @@ final class Vocab
     public const MEMBER = self::HYDRA.'member';
     public const OPERATION_PROP = self::HYDRA.'operation';
     public const MEMBER_ASSERTION = self::HYDRA.'memberAssertion';
+    public const ENTRYPOINT = self::HYDRA.'entrypoint';
 
     // RDF
     public const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';

@@ -19,12 +19,12 @@ final class HydraResponseParser
     /**
      * Extract affordances from an expanded resource response (inline hydra:search and hydra:operation).
      *
-     * @param JsonLdDocument $doc          The expanded JSON-LD document
-     * @param array          $compactJsonLd The original compact JSON-LD (for collection @id used in search URIs)
+     * @param \stdClass             $compactJsonLd   the original compact JSON-LD, whose @id is the IRI the client sees
+     * @param array<string, string> $entrypointLinks entrypoint link name => collection IRI
      *
      * @return StoredAffordance[]
      */
-    public function extractAffordances(JsonLdDocument $doc, \stdClass $compactJsonLd): array
+    public function extractAffordances(JsonLdDocument $doc, \stdClass $compactJsonLd, array $entrypointLinks = []): array
     {
         $node = $doc->first();
         if (null === $node) {
@@ -32,9 +32,35 @@ final class HydraResponseParser
         }
 
         return array_merge(
-            $this->parseSearch($node, $compactJsonLd),
-            $this->parseInlineOperations($node),
+            $this->parseSearch($node, $compactJsonLd, $entrypointLinks),
+            $this->parseInlineOperations($node, $compactJsonLd),
         );
+    }
+
+    /**
+     * The links of an entrypoint representation: link name => collection IRI.
+     *
+     * @return array<string, string>
+     */
+    public function entrypointLinks(\stdClass $compactEntrypoint): array
+    {
+        $links = [];
+        foreach (get_object_vars($compactEntrypoint) as $name => $value) {
+            if ($value instanceof \stdClass) {
+                $value = $value->{'@id'} ?? null;
+            }
+
+            if ('@' !== ($name[0] ?? '') && \is_string($value)) {
+                $links[$name] = $value;
+            }
+        }
+
+        return $links;
+    }
+
+    public function entrypointIri(JsonLdDocument $docs): ?string
+    {
+        return $docs->first()?->id(Vocab::ENTRYPOINT);
     }
 
     /**
@@ -95,47 +121,35 @@ final class HydraResponseParser
     }
 
     /**
-     * Extract operations for a single class from expanded docs.jsonld.
+     * Operations on the managed class and on the hydra:Link properties that reach it or start from it.
      *
-     * @param JsonLdDocument $docs            The expanded docs.jsonld document
-     * @param string         $managedClassId  The @id of the managed class to extract operations for
-     * @param string         $collectionUri   The collection URI (used as target for POST operations)
+     * Class operations are supported by instances and take the target "uri". An operation on an entrypoint
+     * link targets the collection the entrypoint gives for that link. An operation on another class's link
+     * takes the IRI of the resource holding the link, named after that class; the link is followed at call time.
+     *
+     * @param JsonLdDocument        $docs            the expanded docs.jsonld document
+     * @param string                $managedClassId  the @id (or local name) of the managed class
+     * @param array<string, string> $entrypointLinks entrypoint link name => collection IRI
      *
      * @return StoredAffordance[]
      */
-    public function extractClassOperations(JsonLdDocument $docs, string $managedClassId, string $collectionUri): array
+    public function extractClassOperations(JsonLdDocument $docs, string $managedClassId, array $entrypointLinks): array
     {
         $docsNode = $docs->first();
         if (null === $docsNode) {
             return [];
         }
 
-        $supportedClasses = $docsNode->all(Vocab::SUPPORTED_CLASS);
-        if ([] === $supportedClasses) {
-            return [];
-        }
-
-        // Build class map for expects lookups
-        $classMap = [];
-        foreach ($supportedClasses as $class) {
-            $classId = $class->nodeId();
-            if (null !== $classId) {
-                $classMap[$classId] = $class;
-            }
-        }
-
+        $classMap = $this->buildClassMap($docsNode);
         $targetClass = $this->resolveClass($managedClassId, $classMap);
         if (null === $targetClass) {
             return [];
         }
 
-        // Derive a resource name from the class title or IRI fragment
-        $resourceName = $targetClass->value(Vocab::TITLE)
-            ?? $this->localName($managedClassId);
+        $managedClassId = $targetClass->nodeId() ?? $managedClassId;
+        $resourceName = $targetClass->value(Vocab::TITLE) ?? $this->localName($managedClassId);
+        $affordances = $this->linkOperations($managedClassId, $entrypointLinks, $classMap);
 
-        $affordances = [];
-
-        // Extract operations from the class's supportedOperations
         foreach ($targetClass->all(Vocab::SUPPORTED_OPERATION) as $operation) {
             $method = $operation->value(Vocab::METHOD);
             if (null === $method) {
@@ -143,91 +157,91 @@ final class HydraResponseParser
             }
 
             $method = strtoupper($method);
-            $uri = $collectionUri;
-
-            $isInstance = 'POST' !== $method;
-            $affordance = $this->buildOperationAffordance(
+            $affordances[] = $this->buildOperationAffordance(
                 $operation,
                 $method,
                 $resourceName,
-                $uri,
-                $managedClassId,
+                $this->expectedClassId($operation, $managedClassId),
                 $classMap,
-                $isInstance,
-            );
-
-            if (null !== $affordance) {
-                $affordances[] = $affordance;
-            }
-        }
-
-        // Also check supportedProperty operations (entrypoint-style)
-        $entrypointClass = null;
-        foreach ($supportedClasses as $class) {
-            $title = $class->value(Vocab::TITLE);
-            if ('Entrypoint' === $title) {
-                $entrypointClass = $class;
-                break;
-            }
-        }
-
-        if (null !== $entrypointClass) {
-            $affordances = array_merge(
-                $affordances,
-                $this->extractPropertyOperationsForClass($entrypointClass, $managedClassId, $collectionUri, $classMap),
+                ['uri' => 'The URI of the resource to operate on'],
             );
         }
 
-        return $affordances;
+        $byName = [];
+        foreach ($affordances as $affordance) {
+            $byName[$affordance->name] ??= $affordance;
+        }
+
+        return array_values($byName);
     }
 
     /**
-     * Extract operations from Entrypoint supportedProperty that target a specific class.
-     *
+     * @param array<string, string>     $entrypointLinks
      * @param array<string, JsonLdNode> $classMap
      *
      * @return StoredAffordance[]
      */
-    private function extractPropertyOperationsForClass(JsonLdNode $entrypointClass, string $managedClassId, string $collectionUri, array $classMap): array
+    private function linkOperations(string $managedClassId, array $entrypointLinks, array $classMap): array
     {
         $affordances = [];
+        $managedName = $this->localName($managedClassId);
 
-        foreach ($entrypointClass->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
-            $property = $supportedProp->first(Vocab::PROPERTY);
-            if (null === $property) {
-                continue;
-            }
+        foreach ($classMap as $domainId => $domainClass) {
+            $isEntrypoint = 'Entrypoint' === $this->localName($domainId) || 'Entrypoint' === $domainClass->value(Vocab::TITLE);
+            $domainName = $domainClass->value(Vocab::TITLE) ?? $this->localName($domainId);
 
-            // Check if this property targets the managed class
-            $targetClassId = $this->resolveTargetClass($property);
-            if ($targetClassId !== $managedClassId && $this->localName($targetClassId ?? '') !== $this->localName($managedClassId)) {
-                continue;
-            }
-
-            $propertyName = $property->value(Vocab::LABEL)
-                ?? $this->fragmentName($property->nodeId());
-
-            if (null === $propertyName) {
-                continue;
-            }
-
-            foreach ($property->all(Vocab::SUPPORTED_OPERATION) as $operation) {
-                $method = $operation->value(Vocab::METHOD);
-                if (null === $method) {
+            foreach ($domainClass->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
+                $property = $supportedProp->first(Vocab::PROPERTY);
+                if (null === $property || !\in_array(Vocab::LINK, $property->types(), true)) {
                     continue;
                 }
 
-                $affordance = $this->buildOperationAffordance(
-                    $operation,
-                    strtoupper($method),
-                    $propertyName,
-                    $collectionUri,
-                    $targetClassId,
-                    $classMap,
-                );
+                $operations = $property->all(Vocab::SUPPORTED_OPERATION);
+                $rangeId = $this->resolveTargetClass($property);
+                $reachesManaged = null !== $rangeId && $this->localName($rangeId) === $managedName;
+                $startsFromManaged = !$isEntrypoint && $this->localName($domainId) === $managedName;
+                if ([] === $operations || (!$reachesManaged && !$startsFromManaged)) {
+                    continue;
+                }
 
-                if (null !== $affordance) {
-                    $affordances[] = $affordance;
+                $linkName = $property->value(Vocab::LABEL) ?? $this->fragmentName($property->nodeId());
+                if (null === $linkName) {
+                    continue;
+                }
+
+                if ($isEntrypoint && !isset($entrypointLinks[$linkName])) {
+                    continue;
+                }
+
+                foreach ($operations as $operation) {
+                    $method = $operation->value(Vocab::METHOD);
+                    if (null === $method) {
+                        continue;
+                    }
+
+                    $method = strtoupper($method);
+                    $expects = $this->expectedClassId($operation, $rangeId);
+
+                    if ($isEntrypoint) {
+                        $affordances[] = $this->buildOperationAffordance($operation, $method, $linkName, $expects, $classMap, [], uri: $entrypointLinks[$linkName]);
+                        continue;
+                    }
+
+                    $parentParam = $this->toSnakeCase($domainName);
+                    if ($this->bodyDeclares($expects, $classMap, $method, $parentParam)) {
+                        $parentParam .= '_iri';
+                    }
+
+                    $affordances[] = $this->buildOperationAffordance(
+                        $operation,
+                        $method,
+                        $linkName,
+                        $expects,
+                        $classMap,
+                        [$parentParam => \sprintf('IRI of the %s whose "%s" link is the target', $domainName, $linkName)],
+                        link: $linkName,
+                        parentParam: $parentParam,
+                    );
                 }
             }
         }
@@ -235,56 +249,60 @@ final class HydraResponseParser
         return $affordances;
     }
 
+    private function expectedClassId(JsonLdNode $operation, ?string $default): ?string
+    {
+        return $operation->id(Vocab::EXPECTS) ?? $default;
+    }
+
     /**
      * @param array<string, JsonLdNode> $classMap
+     */
+    private function bodyDeclares(?string $classId, array $classMap, string $method, string $name): bool
+    {
+        if ('GET' === $method || 'DELETE' === $method) {
+            return false;
+        }
+
+        return isset($this->collectBodyProperties($this->resolveClass($classId, $classMap), $method)[0][$name]);
+    }
+
+    /**
+     * @param array<string, JsonLdNode> $classMap
+     * @param array<string, string>     $targetParams arguments locating the target, name => description
      */
     private function buildOperationAffordance(
         JsonLdNode $operation,
         string $method,
         string $resourceName,
-        string $uri,
         ?string $expectsClassId,
         array $classMap,
-        bool $isInstance = false,
-    ): ?StoredAffordance {
+        array $targetParams,
+        ?string $uri = null,
+        ?string $link = null,
+        ?string $parentParam = null,
+    ): StoredAffordance {
         // Use the operation's own name (hydra:title) as tool name — never guess from HTTP method
         $operationTitle = $operation->value(Vocab::TITLE);
-        $toolName = null !== $operationTitle
-            ? $this->toSnakeCase($operationTitle)
-            : $this->toSnakeCase($resourceName);
+        $toolName = $this->toSnakeCase($operationTitle ?? $resourceName);
 
         $description = $operation->value(Vocab::DESCRIPTION)
             ?? $operationTitle
             ?? $toolName;
 
-        $expects = $operation->id(Vocab::EXPECTS) ?? $expectsClassId;
-        $inputSchema = $this->buildInputSchemaFromClass($expects, $classMap, $method, $isInstance);
+        [$properties, $required] = 'GET' === $method || 'DELETE' === $method
+            ? [[], []]
+            : $this->collectBodyProperties($this->resolveClass($expectsClassId, $classMap), $method);
 
         return new StoredAffordance(
             name: $toolName,
             description: $description,
-            inputSchema: $inputSchema,
+            inputSchema: $this->assembleSchema($properties, $required, $method, $targetParams),
             type: 'operation',
             uri: $uri,
             method: $method,
+            link: $link,
+            parentParam: $parentParam,
         );
-    }
-
-    /**
-     * @param array<string, JsonLdNode> $classMap
-     */
-    private function buildInputSchemaFromClass(?string $classId, array $classMap, string $method, bool $isInstance): array
-    {
-        $needsUri = $isInstance && 'POST' !== $method;
-
-        // DELETE and GET don't need body properties — only the uri parameter
-        if ('DELETE' === $method || 'GET' === $method) {
-            return $this->assembleSchema([], [], $method, $needsUri);
-        }
-
-        [$properties, $required] = $this->collectBodyProperties($this->resolveClass($classId, $classMap), $method);
-
-        return $this->assembleSchema($properties, $required, $method, $needsUri);
     }
 
     /**
@@ -618,9 +636,13 @@ final class HydraResponseParser
     // --- Inline response parsing ---
 
     /**
+     * A search on an entrypoint collection targets it; any other collection of that kind is given at call time.
+     *
+     * @param array<string, string> $entrypointLinks
+     *
      * @return StoredAffordance[]
      */
-    private function parseSearch(JsonLdNode $node, \stdClass $compactJsonLd): array
+    private function parseSearch(JsonLdNode $node, \stdClass $compactJsonLd, array $entrypointLinks): array
     {
         $search = $node->first(Vocab::SEARCH);
         if (null === $search) {
@@ -633,38 +655,42 @@ final class HydraResponseParser
         }
 
         $resourceName = $this->deriveResourceName($node);
-        $toolName = 'search_'.$resourceName;
-
-        // Use the compact @id for the collection URI (relative path)
-        $collectionUri = $compactJsonLd->{'@id'} ?? $search->value(Vocab::TEMPLATE);
         $paramNames = array_keys($inputSchema['properties']);
+        $collectionUri = $compactJsonLd->{'@id'} ?? $node->nodeId();
+        $entrypointCollections = array_map(Iri::path(...), $entrypointLinks);
+        $isEntrypointCollection = \is_string($collectionUri) && \in_array(Iri::path($collectionUri), $entrypointCollections, true);
+
+        if (!$isEntrypointCollection) {
+            $inputSchema['properties'] = ['collection' => ['type' => 'string', 'description' => "IRI of the {$resourceName} collection to search"]] + $inputSchema['properties'];
+            $inputSchema['required'] = ['collection', ...$inputSchema['required'] ?? []];
+        }
 
         return [
             new StoredAffordance(
-                name: $toolName,
+                name: 'search_'.$resourceName,
                 description: "Search {$resourceName} by: ".implode(', ', $paramNames),
                 inputSchema: $inputSchema,
                 type: 'search',
-                uri: $collectionUri,
+                uri: $isEntrypointCollection ? $collectionUri : null,
                 paramNames: $paramNames,
             ),
         ];
     }
 
     /**
-     * Parse inline hydra:operation from an expanded resource response.
+     * Inline hydra:operation of a resource: run only on the resources that advertised it.
      *
      * @return StoredAffordance[]
      */
-    private function parseInlineOperations(JsonLdNode $node): array
+    private function parseInlineOperations(JsonLdNode $node, \stdClass $compactJsonLd): array
     {
         $operations = $node->all(Vocab::OPERATION_PROP);
         if ([] === $operations) {
             return [];
         }
 
-        $resourceUri = $node->nodeId();
-        if (null === $resourceUri) {
+        $resourceUri = $compactJsonLd->{'@id'} ?? $node->nodeId();
+        if (!\is_string($resourceUri)) {
             return [];
         }
 
@@ -679,9 +705,7 @@ final class HydraResponseParser
 
             $method = strtoupper($method);
             $operationTitle = $operation->value(Vocab::TITLE);
-            $toolName = null !== $operationTitle
-                ? $this->toSnakeCase($operationTitle)
-                : $this->toSnakeCase($resourceName);
+            $toolName = $this->toSnakeCase($operationTitle ?? $resourceName);
             $description = $operation->value(Vocab::DESCRIPTION)
                 ?? $operationTitle
                 ?? $toolName;
@@ -708,15 +732,13 @@ final class HydraResponseParser
                 }
             }
 
-            $inputSchema = $this->assembleSchema($properties, $required, $method, false);
-
             $affordances[] = new StoredAffordance(
                 name: $toolName,
                 description: $description,
-                inputSchema: $inputSchema,
+                inputSchema: $this->assembleSchema($properties, $required, $method, ['uri' => 'The URI of a resource that lists this operation in its hydra:operation']),
                 type: 'operation',
-                uri: $resourceUri,
                 method: $method,
+                advertisedBy: [$resourceUri],
             );
         }
 
@@ -743,7 +765,7 @@ final class HydraResponseParser
      * Extract the local/fragment name from a full IRI.
      * "https://localhost/#Book" → "Book"
      * "http://www.w3.org/ns/hydra/core#Collection" → "Collection"
-     * "https://localhost/admin/books" → "books"
+     * "https://localhost/admin/books" → "books".
      */
     private function localName(string $iri): string
     {
@@ -756,7 +778,7 @@ final class HydraResponseParser
 
     /**
      * Extract the property name from an @id with fragment.
-     * "https://localhost/#Entrypoint/book" → "book"
+     * "https://localhost/#Entrypoint/book" → "book".
      */
     private function fragmentName(?string $iri): ?string
     {
@@ -785,48 +807,24 @@ final class HydraResponseParser
     }
 
     /**
-     * Assemble a JSON Schema envelope for a tool's input.
-     *
-     * Handles: uri property injection, DELETE/GET → minimal schema,
-     * no properties → payload fallback, else properties+required.
+     * Assemble a JSON Schema envelope for a tool's input: the required target arguments, then the body
+     * properties, or a free "payload" when a body is expected but its properties are unknown.
      *
      * @param array<string, array<string, string>> $properties
      * @param string[]                             $required
+     * @param array<string, string>                $targetParams name => description
      */
-    private function assembleSchema(array $properties, array $required, string $method, bool $needsUri): array
+    private function assembleSchema(array $properties, array $required, string $method, array $targetParams): array
     {
-        if ($needsUri) {
-            $properties = array_merge([
-                'uri' => [
-                    'type' => 'string',
-                    'description' => 'The URI of the resource to operate on',
-                ],
-            ], $properties);
-            array_unshift($required, 'uri');
+        if ([] === $properties && 'DELETE' !== $method && 'GET' !== $method) {
+            $properties = ['payload' => ['type' => 'object', 'description' => 'JSON payload for the request']];
         }
 
-        if ('DELETE' === $method || 'GET' === $method) {
-            $schema = ['type' => 'object', 'properties' => [] === $properties ? new \stdClass() : $properties];
-            if ([] !== $required) {
-                $schema['required'] = $required;
-            }
+        $targets = array_map(static fn (string $description): array => ['type' => 'string', 'description' => $description], $targetParams);
+        $properties = $targets + $properties;
+        $required = [...array_keys($targetParams), ...$required];
 
-            return $schema;
-        }
-
-        if ([] === $properties || ($needsUri && 1 === \count($properties))) {
-            return [
-                'type' => 'object',
-                'properties' => array_merge($properties, [
-                    'payload' => [
-                        'type' => 'object',
-                        'description' => 'JSON payload for the request',
-                    ],
-                ]),
-            ];
-        }
-
-        $schema = ['type' => 'object', 'properties' => $properties];
+        $schema = ['type' => 'object', 'properties' => [] === $properties ? new \stdClass() : $properties];
         if ([] !== $required) {
             $schema['required'] = $required;
         }

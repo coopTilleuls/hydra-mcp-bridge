@@ -35,11 +35,26 @@ The E2E tests (`tests/e2e.sh`) are the primary integration tests — they exerci
 
 The gateway discovers tools lazily as the MCP client navigates the Hydra API:
 
-**Phase 1 — Entrypoint (`@type: "Entrypoint"`):** Caches the `docs.jsonld` URL from the response `Link` header. No tools registered. Returns collection links as awareness.
+**Phase 1 — Entrypoint (`@type: "Entrypoint"`):** Caches the `docs.jsonld` URL from the response `Link` header and the entrypoint links (`book` → `/books`). No tools registered. Returns collection links as awareness.
 
-**Phase 2 — Collection visit (`@type` contains `hydra:Collection`):** Resolves the managed class (via `hydra:memberAssertion` → `members[0][@type]` → `@context` URL fallback), fetches `docs.jsonld` (cached after first fetch), extracts `hydra:supportedClass` operations → registers typed CRUD tools (`create_`, `read_`, `update_`, `replace_`, `delete_`). Also discovers `hydra:search` → registers `search_` tools.
+**Phase 2 — Collection visit (`@type` contains `hydra:Collection`):** Resolves the managed class (via `hydra:memberAssertion` → `members[0][@type]` → `@context` URL fallback), fetches `docs.jsonld` (cached after first fetch), and the entrypoint named by `hydra:entrypoint` when it was not visited. Registers typed tools named from the operation `hydra:title`: the managed class's `supportedOperation`, and the `supportedOperation` of every `hydra:Link` property whose range is the managed class or whose domain is it (Hydra §7: "the target of the Hydra link"). Also discovers `hydra:search` → registers `search_` tools.
 
 **Phase 3 — Inline overrides:** `hydra:operation` nodes in any resource response override or add tools discovered in Phase 2. Always runs.
+
+### Tool Binding
+
+A tool is identified by its name and never carries a target found on one resource for use on another (an eval run once posted a review for a new book on the book whose reviews were read first). `StoredAffordance` holds how the target is found; `DynamicToolRequestHandler::target()` resolves it at call time:
+
+| Affordance | Arguments | Target |
+|---|---|---|
+| Class `supportedOperation` | `uri` | the given resource |
+| `#Entrypoint/x` link operation | body | the entrypoint's `x` value (`uri`); not registered when the entrypoint has no `x` |
+| Other `hydra:Link` operation (`#Book/reviews`) | `book` (the link's domain in snake_case, `_iri` suffix if the body has that name) + body | GET the parent, read `reviews` from its compact JSON-LD (`link`, `parentParam`) |
+| `hydra:search` on an entrypoint collection | template variables | that collection (`uri`) |
+| `hydra:search` elsewhere | `collection` + template variables | the given collection |
+| Inline `hydra:operation` | `uri` | the given resource, only if it is one of `advertisedBy` (resources whose representation listed it); seeing it on another resource extends `advertisedBy` |
+
+The `uri` argument is only honored when the tool's schema declares it, and only declared body properties are sent. A second affordance with an existing name but another binding is ignored with a warning.
 
 After registering new tools, `Fiber::suspend()` sends a `ToolListChangedNotification` to the MCP client.
 
@@ -60,8 +75,8 @@ After registering new tools, `Fiber::suspend()` sends a `ToolListChangedNotifica
 - **`ReadHydraResourceProcessor`** — The only static tool's processor. Orchestrates discovery phases.
 - **`HydraResponseParser`** — Stateless parser extracting affordances from expanded JSON-LD. Handles `hydra:search`, `hydra:operation`, and `hydra:supportedClass` operations from `docs.jsonld`.
 - **`DynamicToolRegistry`** — Registers `StoredAffordance` as MCP tools. Uses a plain string handler constant — never container-resolved.
-- **`DynamicToolRequestHandler`** — `RequestHandlerInterface` that intercepts dynamic tool calls. Routes `search` → GET with query params, `operation` → HTTP method with JSON-LD body.
-- **`AffordanceStore`** — File-based persistence per MCP session (`var/cache/dev/mcp/{sessionId}.*`). Stores affordances, docs URL, and cached expanded docs.
+- **`DynamicToolRequestHandler`** — `RequestHandlerInterface` that intercepts dynamic tool calls. Resolves the target (see Tool Binding), then routes `search` → GET with query params, `operation` → HTTP method with JSON-LD body.
+- **`AffordanceStore`** — File-based persistence per MCP session (`var/cache/dev/mcp/{sessionId}.*`). Stores affordances, docs URL, entrypoint links, and cached expanded docs.
 - **`RestoringRegistryDecorator`** — Decorates `mcp.registry` to lazily restore tools from `AffordanceStore` across PHP process boundaries.
 - **`Expander` + `Vocab`** — JSON-LD expansion via `sweetrdf/json-ld`. `Vocab` holds IRI constants. `Expander` has static helpers for navigating expanded nodes (`value()`, `id()`, `all()`, `first()`, `types()`).
 
