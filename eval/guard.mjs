@@ -13,6 +13,9 @@ const INFRASTRUCTURE_ERROR = /could not resolve host|failed to connect|timed out
 
 const MAX_TIMEOUT_STREAK = 3;
 
+// A model that keeps calling tools until the timeout is a model failure; few calls in the whole budget means a stall.
+const STALLED_MAX_TOOL_CALLS = 10;
+
 export class Guard {
   #timeoutStreak = 0;
 
@@ -31,9 +34,10 @@ export class Guard {
       }
     }
 
-    this.#timeoutStreak = result.timedOut ? this.#timeoutStreak + 1 : 0;
+    const stalled = result.timedOut && (result.clientToolCalls ?? []).length < STALLED_MAX_TOOL_CALLS;
+    this.#timeoutStreak = stalled ? this.#timeoutStreak + 1 : 0;
     if (this.#timeoutStreak >= MAX_TIMEOUT_STREAK) {
-      reasons.push(`${MAX_TIMEOUT_STREAK} timeouts in a row`);
+      reasons.push(`${MAX_TIMEOUT_STREAK} stalled timeouts in a row`);
     }
 
     if (!result.timedOut && 0 !== result.exitCode && !result.response) {

@@ -23,11 +23,19 @@ test('an expected API error does not abort', () => {
   assert.deepEqual(new Guard().check({ ...ok, clientToolCalls: [{ tool: 'post_bookmark', status: 'error', error: 'An exception occurred while executing a query: SQLSTATE[23502]' }] }), []);
 });
 
-test('three timeouts in a row abort', () => {
+test('three stalled timeouts in a row abort', () => {
   const guard = new Guard();
   assert.deepEqual(guard.check({ ...ok, timedOut: true }), []);
   assert.deepEqual(guard.check({ ...ok, timedOut: true }), []);
-  assert.match(guard.check({ ...ok, timedOut: true })[0], /3 timeouts in a row/);
+  assert.match(guard.check({ ...ok, timedOut: true })[0], /3 stalled timeouts in a row/);
+});
+
+test('a model looping on tool calls until the timeout is not an anomaly', () => {
+  const guard = new Guard();
+  const looping = { ...ok, timedOut: true, clientToolCalls: Array.from({ length: 40 }, () => ({ tool: 'post_book', status: 'completed' })) };
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(guard.check(looping), []);
+  }
 });
 
 test('a crash without response aborts', () => {

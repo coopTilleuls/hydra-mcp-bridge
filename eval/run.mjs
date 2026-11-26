@@ -45,6 +45,7 @@ function parseArgs() {
     timeoutMs: 120_000,
     dryRun: false,
     skipReset: false,
+    skipExisting: false,
     condition: 'A', // A = Hydra gateway (dynamic tools), B = OpenAPI static, C = Hydra gateway (static tools)
   };
 
@@ -63,6 +64,7 @@ function parseArgs() {
       case '--timeout': opts.timeoutMs = parseInt(val ?? args[++i], 10); break;
       case '--dry-run': opts.dryRun = true; break;
       case '--skip-reset': opts.skipReset = true; break;
+      case '--skip-existing': opts.skipExisting = true; break;
       case '--condition': {
         const v = (val ?? args[++i])?.toUpperCase();
         if (v !== 'A' && v !== 'B' && v !== 'C') {
@@ -347,6 +349,11 @@ async function main() {
 
     for (const task of tasks) {
       for (let run = 1; run <= opts.runs; run++) {
+        const resultFile = join(RESULTS_DIR, `${task.id}_${opts.condition.toLowerCase()}_${slug.replace(/\//g, '_')}_${run}.json`);
+        if (opts.skipExisting && existsSync(resultFile)) {
+          continue;
+        }
+
         console.log(`\n[${slug}] Task ${task.id} (Tier ${task.tier}) — run ${run}/${opts.runs}`);
         console.log(`  Prompt: "${task.prompt}"`);
 
