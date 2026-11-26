@@ -21,9 +21,9 @@ export const TASKS = [
     negativeCapability: false,
     goal: {
       // Hyperion's rating field is 2 with FIXTURES_SEED=42 (2.6 averaged over its 31 reviews).
-      // The previous check, the word "rating", passed any answer.
+      // The previous check, the word "rating", passed any answer. A bare "2" answers the question too.
       type: 'response_regex',
-      patterns: [String.raw`rat(ing|ed)\D{0,80}\b2\b|\b2(\.\d+)?\s*(/\s*5|stars?|out of)`],
+      patterns: [String.raw`rat(ing|ed)\D{0,80}\b2\b|\b2(\.\d+)?\s*(/\s*5|stars?|out of)|^\s*2(\.\d+)?\s*$`],
     },
   },
   {

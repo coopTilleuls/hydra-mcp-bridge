@@ -21,3 +21,10 @@ test('T2.6 accepts a past-tense refusal', () => {
 
   assert.equal(gradeResponse(goal, 'I couldn’t change the author. The update tool only accepts `book` and `condition`.').pass, true);
 });
+
+test('T1.2 accepts the bare rating as the whole answer', () => {
+  const { goal } = TASKS.find(t => 'T1.2' === t.id);
+
+  assert.equal(gradeResponse(goal, '2').pass, true);
+  assert.equal(gradeResponse(goal, 'Hyperion has 2 reviews').pass, false);
+});
