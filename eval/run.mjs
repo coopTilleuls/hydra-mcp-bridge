@@ -24,6 +24,7 @@ import { join, relative } from 'node:path';
 
 import { TASKS } from './tasks.mjs';
 import { evaluateGoal } from './grade.mjs';
+import { Guard } from './guard.mjs';
 import {
   PROJECT_ROOT, EVAL_LOG_DIR, RESULTS_DIR,
   MCP_CACHE_DIR, MODELS, GATEWAY_CLIENT_SLUG,
@@ -338,6 +339,7 @@ async function main() {
   mkdirSync(RESULTS_DIR, { recursive: true });
 
   const summary = { total: 0, pass: 0, fail: 0, manual: 0, error: 0 };
+  const guard = new Guard();
 
   for (const model of models) {
     const slug = modelSlug(model);
@@ -444,6 +446,12 @@ async function main() {
 
         saveResult(resultObj, condSuffix);
         console.log(`  Saved: var/eval/results/${task.id}_${condSuffix}_${slug.replace(/\//g, '_')}_${run}.json`);
+
+        const abortReasons = guard.check(resultObj);
+        if (abortReasons.length > 0) {
+          console.log(`\nABORT: ${abortReasons.join('; ')}`);
+          process.exit(3);
+        }
       }
     }
   }
