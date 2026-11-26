@@ -29,7 +29,28 @@ Each condition has its own project directory with `.mcp.json` and per-CLI settin
 All CLIs spawn with `cwd` set to the condition's directory so they pick up:
 - `.mcp.json` — MCP server config
 - `.claude/settings.local.json` — Claude tool permissions
-- `opencode.json` — OpenCode MCP config
+- `opencode.json` — OpenCode MCP config, plus sampling and OpenRouter provider pinning. Copy it from `eval/opencode/<dir>/opencode.json` (see [Models and sampling](#models-and-sampling)). The tracked copies point at the shared eval host's ports (`18200` gateway, `18143` demo API); change the `mcp` URLs for a local stack.
+
+## Models and sampling
+
+Default models (`eval/config.mjs`, overridden by `EVAL_MODELS`): `openrouter/openai/gpt-6-luna`, `openrouter/google/gemini-3.5-flash-lite`, `openrouter/deepseek/deepseek-v4.1-flash`.
+
+`eval/opencode/test-hydra-mcp/opencode.json` and `eval/opencode/test-openapi-mcp/opencode.json` carry the same sampling block; only `mcp` differs:
+
+| Model | OpenRouter endpoint (`provider.order`, `allow_fallbacks: false`) | temperature | seed |
+|-------|------------------------------------------------------------------|-------------|------|
+| `openai/gpt-6-luna` | `openai` | not sent (`"temperature": false` on the model) | 42 |
+| `google/gemini-3.5-flash-lite` | `google-ai-studio` (the `google-vertex` endpoint ignores temperature) | 0 | 42 |
+| `deepseek/deepseek-v4.1-flash` | `deepinfra/fp8`, `quantizations: ["fp8"]` | 0 | 42 |
+
+Every model also sends `reasoning: {effort: "low"}` and `service_tier: "default"`. Providers sell flex and priority tiers as separate endpoints; `service_tier: "default"` pins the standard one, and a tier-less slug such as `deepinfra/fp8` never matches a tier endpoint ([provider routing](https://openrouter.ai/docs/features/provider-routing), [service tiers](https://openrouter.ai/docs/guides/features/service-tiers)).
+
+How OpenCode 1.19.6 forwards them:
+
+- `agent.build.temperature: 0`: `opencode run` uses the `build` agent. OpenCode sends `temperature` only when the model's `temperature` capability is true, so `"temperature": false` on gpt-6-luna drops it for that model.
+- `provider.openrouter.models.<id>.options`: becomes the AI SDK `providerOptions.openrouter`, which `@openrouter/ai-sdk-provider` spreads into the request body verbatim. That is how `seed` and the OpenRouter `provider` routing object reach the API (OpenCode does not pass the AI SDK `seed` call setting).
+- OpenCode adds `usage: {include: true}` for OpenRouter and, for Gemini models, `reasoning: {effort: "high"}`. Model `options` are merged after these defaults, so the configured `effort: "low"` wins.
+- `agent.title.disable: true` removes the title agent, and `opencode run` then skips title generation (otherwise an extra, unpinned call to an auto-picked small model). `small_model` is set to `openrouter/openai/gpt-6-luna` so any other small-model call uses the pinned route.
 
 ## Switching the gateway mode (A and C)
 
@@ -85,7 +106,10 @@ eval/
   adapters/
     claude.mjs        # Claude CLI adapter (sonnet, --output-format json)
     gemini.mjs        # Gemini CLI adapter (gemini-2.5-flash, --output-format json)
-    opencode.mjs      # OpenCode CLI adapter (github-copilot/gpt-5.4, run --format json)
+    opencode.mjs      # OpenCode CLI adapter (run --format json)
+  opencode/
+    test-hydra-mcp/opencode.json    # OpenCode config for Conditions A and C
+    test-openapi-mcp/opencode.json  # OpenCode config for Condition B
 ```
 
 Output: `var/eval/results/{taskId}_{condition}_{cli}_{run}.json`
@@ -96,7 +120,7 @@ Output: `var/eval/results/{taskId}_{condition}_{cli}_{run}.json`
 |-----|-------|--------------|-------------|
 | `claude` | sonnet | `-p` | `--output-format json` |
 | `gemini` | gemini-2.5-flash | `-p` | `--output-format json` |
-| `opencode` | github-copilot/gpt-5.4 | `run` | `--format json` |
+| `opencode` | `EVAL_MODELS` / `config.mjs` (OpenRouter) | `run` | `--format json` |
 
 ## System Prompts
 

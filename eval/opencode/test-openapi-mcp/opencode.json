@@ -1,0 +1,82 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "small_model": "openrouter/openai/gpt-6-luna",
+  "agent": {
+    "build": {
+      "temperature": 0
+    },
+    "title": {
+      "disable": true
+    }
+  },
+  "provider": {
+    "openrouter": {
+      "models": {
+        "openai/gpt-6-luna": {
+          "temperature": false,
+          "options": {
+            "seed": 42,
+            "provider": {
+              "order": [
+                "openai"
+              ],
+              "allow_fallbacks": false
+            },
+            "service_tier": "default",
+            "reasoning": {
+              "effort": "low"
+            }
+          }
+        },
+        "google/gemini-3.5-flash-lite": {
+          "options": {
+            "seed": 42,
+            "provider": {
+              "order": [
+                "google-ai-studio"
+              ],
+              "allow_fallbacks": false
+            },
+            "service_tier": "default",
+            "reasoning": {
+              "effort": "low"
+            }
+          }
+        },
+        "deepseek/deepseek-v4.1-flash": {
+          "options": {
+            "seed": 42,
+            "provider": {
+              "order": [
+                "deepinfra/fp8"
+              ],
+              "quantizations": [
+                "fp8"
+              ],
+              "allow_fallbacks": false
+            },
+            "service_tier": "default",
+            "reasoning": {
+              "effort": "low"
+            }
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "book-api": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@ivotoby/openapi-mcp-server@1.14.0",
+        "--api-base-url",
+        "https://localhost:18143",
+        "--openapi-spec",
+        "https://localhost:18143/docs.jsonopenapi"
+      ],
+      "enabled": true
+    }
+  }
+}

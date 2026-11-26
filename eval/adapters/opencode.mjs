@@ -91,7 +91,9 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
       if (totalInput > 0 || totalOutput > 0) {
         usage = {
           inputTokens: totalInput,
+          // Includes reasoning, as in results written before reasoningTokens existed.
           outputTokens: totalOutput + totalReasoning,
+          reasoningTokens: totalReasoning,
           totalTokens: totalInput + totalOutput + totalReasoning,
           cacheReadTokens: totalCacheRead,
           cacheCreationTokens: 0,

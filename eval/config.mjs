@@ -26,16 +26,13 @@ export const TEST_HYDRA_DIR = env.EVAL_TEST_HYDRA_DIR || '/home/soyuka/projects/
 // Condition B: OpenAPI static MCP (all tools pre-registered at init)
 export const TEST_OPENAPI_DIR = env.EVAL_TEST_OPENAPI_DIR || '/home/soyuka/projects/test-openapi-mcp';
 
-// All models run through OpenCode CLI via GitHub Copilot
-// Use full model IDs; select with --model=github-copilot/gpt-5-mini
-// EVAL_MODELS=openrouter/openai/gpt-5-mini,... overrides the list (e.g. another provider route).
+// All models run through OpenCode CLI via OpenRouter; select one with --model=openrouter/openai/gpt-6-luna.
+// EVAL_MODELS=a,b,... overrides the list. Sampling and provider pinning are per model in
+// eval/opencode/*/opencode.json (provider.openrouter.models, keyed without the `openrouter/` prefix).
 export const MODELS = env.EVAL_MODELS ? env.EVAL_MODELS.split(',') : [
-  // 'github-copilot/claude-sonnet-4.6',
-  'github-copilot/gemini-3-flash-preview',
-  // 'github-copilot/gpt-4.1',
-  // 'mistral/mistral-medium-latest',
-  // 'mistral/devstral-medium-latest',
-  'github-copilot/gpt-5-mini',
+  'openrouter/openai/gpt-6-luna',
+  'openrouter/google/gemini-3.5-flash-lite',
+  'openrouter/deepseek/deepseek-v4.1-flash',
 ];
 
 // Derive a short slug from a full model ID for filenames/display
