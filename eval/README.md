@@ -85,6 +85,21 @@ node eval/run.mjs --skip-reset                   # Skip DB fixture reset
 node eval/run.mjs --dry-run                      # Preview what would run
 ```
 
+## Judge
+
+Keyword grading of refusal answers produces false failures ("a new user cannot be created" misses the keyword "cannot create"). The negative-capability tasks T1.5, T2.5, T2.6 and T4.4 therefore carry a `judge: { rubric }` in `eval/tasks.mjs`, next to their keyword goal.
+
+```bash
+node eval/judge.mjs <results-dir>      # writes <results-dir>/judgments.json
+node eval/analyze.mjs                  # EVAL_RESULTS_DIR=<results-dir>, reports keywordPassRate and judgePassRate
+```
+
+- The judge is Sonnet (`claude -p --model sonnet --output-format json`, no tools, prompt on stdin), run through the local Claude Code subscription, no API key. It sees the task prompt, the rubric, the agent's final response and the tool calls with their arguments (clipped to 400 characters each). Condition B results carry no tool calls, the prompt says so and the judge works from the response alone.
+- It must answer `{"verdict":"PASS"|"FAIL","reason":"..."}`; an unparsable answer is retried once. Two calls run at a time.
+- `judgments.json` is keyed by result filename and stores verdict, reason, model, date and the sha256 of the prompt. An entry whose prompt hash is unchanged is skipped, so reruns cost nothing. Changing a rubric or a response re-judges that file only.
+- `analyze.mjs` uses the judge verdict for the M1 pass rate of judged runs and adds `keywordPassRate` and `judgePassRate` columns.
+- The judge is itself an LLM: report a manual agreement sample (a hand-read subset of the judged runs against the judge verdicts) alongside the results.
+
 ## Analysis
 
 ```bash

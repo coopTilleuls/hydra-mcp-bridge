@@ -12,7 +12,7 @@
  *   node eval/analyze.mjs --tier 1           # Filter by tier
  */
 
-import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,12 +56,21 @@ function reEvaluateGoal(result) {
 }
 
 function loadResults(opts) {
-  const files = readdirSync(RESULTS_DIR).filter(f => f.endsWith('.json') && f !== 'summary.json');
-  let results = files.map(f => JSON.parse(readFileSync(join(RESULTS_DIR, f), 'utf-8')));
+  const files = readdirSync(RESULTS_DIR).filter(f => f.endsWith('.json') && f !== 'summary.json' && f !== 'judgments.json');
+  const judgmentsPath = join(RESULTS_DIR, 'judgments.json');
+  const judgments = existsSync(judgmentsPath) ? JSON.parse(readFileSync(judgmentsPath, 'utf-8')) : {};
+  let results = files.map(f => ({ ...JSON.parse(readFileSync(join(RESULTS_DIR, f), 'utf-8')), file: f }));
 
   // Re-evaluate response-based goals against current task definitions
   for (const r of results) {
     r.goalResult = reEvaluateGoal(r);
+    // The judge verdict (eval/judge.mjs) replaces the keyword verdict for the M1 pass rate, the keyword one is kept to report both.
+    const judgment = judgments[r.file];
+    if (judgment) {
+      r.keywordPass = r.goalResult?.pass ?? null;
+      r.judgePass = judgment.verdict === 'PASS';
+      r.goalResult = { pass: r.judgePass, detail: `judge: ${judgment.reason}` };
+    }
   }
 
   if (opts.model) results = results.filter(r => agentKey(r) === opts.model);
@@ -106,6 +115,7 @@ function computeM1(results) {
     const passes = autoEval.filter(r => r.goalResult?.pass === true);
     const passRate = autoEval.length > 0 ? passes.length / autoEval.length : null;
     const allPass = autoEval.length > 0 && autoEval.every(r => r.goalResult?.pass === true);
+    const judged = runs.filter(r => r.judgePass !== undefined);
 
     rows.push({
       taskId: runs[0].taskId,
@@ -118,6 +128,8 @@ function computeM1(results) {
       passRate,
       passK: allPass,
       isNegativeCapability: runs[0].isNegativeCapability,
+      keywordPassRate: judged.length > 0 ? judged.filter(r => r.keywordPass === true).length / judged.length : null,
+      judgePassRate: judged.length > 0 ? judged.filter(r => r.judgePass).length / judged.length : null,
     });
   }
 

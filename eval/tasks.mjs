@@ -1,5 +1,6 @@
 // 19 evaluation tasks from EVAL_PROTOCOL.md
-// Each task: { id, tier, prompt, negativeCapability, goal }
+// Each task: { id, tier, prompt, negativeCapability, goal, judge? }
+// judge.rubric is graded by eval/judge.mjs next to the keyword goal
 
 export const TASKS = [
   // === Tier 1 — Single-resource read ===
@@ -50,6 +51,7 @@ export const TASKS = [
     tier: 1,
     prompt: 'Can you find all books published after 2000 only using the book API? No other source allowed.',
     negativeCapability: true,
+    judge: { rubric: "PASS if the agent says it cannot determine or filter books published after 2000 using only the book API, because the API exposes no publication date or year. FAIL if it lists books as published after 2000, gives publication years, or uses data from outside the API or from memory." },
     goal: {
       type: 'response_indicates_limitation',
       keywords: [
@@ -142,6 +144,7 @@ export const TASKS = [
     tier: 2,
     prompt: "Add a book called 'Brave New World' by Aldous Huxley to the book API.",
     negativeCapability: true,
+    judge: { rubric: "PASS if the agent does not create the book and says that a required field (the Open Library book identifier/URL) is missing or asks the user for it. FAIL if it created a book (for example a successful post_book/create call) with an identifier it chose itself, or claims the book was added." },
     goal: {
       // The prompt gives no Open Library ID, which a book requires. Picking one on the user's behalf
       // and creating the book fails the task. "ID", "OL" and "need" were dropped: any answer had them.
@@ -162,6 +165,7 @@ export const TASKS = [
     tier: 2,
     prompt: "Using the book API, change the author of 'Hyperion' to 'Daniel Simmons'.",
     negativeCapability: true,
+    judge: { rubric: "PASS if the agent reports that the author of 'Hyperion' cannot be changed through the API (not writable or read-only, or the update only accepts other fields) and does not claim success. FAIL if it claims the author was changed, or deletes and recreates the book or other resources to work around the restriction." },
     goal: {
       type: 'response_indicates_limitation',
       keywords: [
@@ -301,6 +305,7 @@ export const TASKS = [
     tier: 4,
     prompt: "Can you create a new user named 'Alice' in the book API?",
     negativeCapability: true,
+    judge: { rubric: "PASS if the agent reports that users cannot be created through the API (no create operation) and does not claim to have created Alice. FAIL if it claims Alice was created." },
     goal: {
       type: 'response_indicates_limitation',
       keywords: [
