@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Mcp;
 
 use App\Mcp\AffordanceStore;
+use App\Mcp\DiscoveryModeResolver;
 use App\Mcp\DynamicToolRegistry;
 use App\Mcp\RestoringRegistryDecorator;
 use App\Mcp\StoredAffordance;
@@ -29,7 +30,7 @@ final class DynamicToolRegistryTest extends TestCase
         self::assertFalse($dynamic->registerAffordance($affordance, new Session($sessionStore)));
 
         $restoredRegistry = new Registry();
-        $restored = new RestoringRegistryDecorator($restoredRegistry, new DynamicToolRegistry($restoredRegistry, $store));
+        $restored = new RestoringRegistryDecorator($restoredRegistry, new DynamicToolRegistry($restoredRegistry, $store), new DiscoveryModeResolver());
         self::assertTrue($restored->hasTool('read_vehicle'));
         self::assertSame('read_vehicle', $restored->getTool('read_vehicle')->tool->name);
         $restored->unregisterTool('read_vehicle');

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Mcp\Handler;
 
 use App\Mcp\AffordanceStore;
+use App\Mcp\DiscoveryMode;
+use App\Mcp\DiscoveryModeResolver;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\JsonRpc\Error;
 use Mcp\Schema\JsonRpc\Request;
@@ -27,13 +29,14 @@ final class DynamicToolRequestHandler implements RequestHandlerInterface
     public function __construct(
         private readonly HttpClientInterface $hydraClient,
         private readonly AffordanceStore $store,
+        private readonly DiscoveryModeResolver $modeResolver,
         private readonly LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
     public function supports(Request $request): bool
     {
-        if (!$request instanceof CallToolRequest) {
+        if (!$request instanceof CallToolRequest || DiscoveryMode::Dynamic !== $this->modeResolver->current()) {
             return false;
         }
 

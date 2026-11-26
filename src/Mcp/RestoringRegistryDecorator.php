@@ -4,51 +4,59 @@ declare(strict_types=1);
 
 namespace App\Mcp;
 
+use App\ApiResource\InvokeApiOperation;
 use Mcp\Capability\Registry\PromptReference;
 use Mcp\Capability\Registry\ResourceReference;
 use Mcp\Capability\Registry\ResourceTemplateReference;
 use Mcp\Capability\Registry\ToolReference;
 use Mcp\Capability\RegistryInterface;
+use Mcp\Exception\ToolNotFoundException;
 use Mcp\Schema\Page;
 use Mcp\Schema\Prompt;
 use Mcp\Schema\ResourceDefinition;
 use Mcp\Schema\ResourceTemplate;
 use Mcp\Schema\Tool;
+use Symfony\Contracts\Service\ResetInterface;
 
 /**
  * Decorates the MCP Registry to lazily restore dynamically discovered tools
  * from persistent storage. This ensures tools survive PHP process boundaries
  * and the DiscoveryLoader's clear() during server build.
+ *
+ * Each discovery mode only sees its own tools: the static mode never the dynamic ones,
+ * the dynamic mode never the invocation tool.
  */
-final class RestoringRegistryDecorator implements RegistryInterface
+final class RestoringRegistryDecorator implements RegistryInterface, ResetInterface
 {
     private bool $restored = false;
 
     public function __construct(
         private readonly RegistryInterface $inner,
         private readonly DynamicToolRegistry $dynamicToolRegistry,
+        private readonly DiscoveryModeResolver $modeResolver,
     ) {
     }
 
     public function getTools(?int $limit = null, ?string $cursor = null): Page
     {
         $this->restoreIfNeeded();
+        $page = $this->inner->getTools($limit, $cursor);
 
-        return $this->inner->getTools($limit, $cursor);
+        return new Page(array_filter($page->references, fn (Tool $tool): bool => $this->isVisible($tool->name)), $page->nextCursor);
     }
 
     public function getTool(string $name): ToolReference
     {
         $this->restoreIfNeeded();
 
-        return $this->inner->getTool($name);
+        return $this->isVisible($name) ? $this->inner->getTool($name) : throw new ToolNotFoundException($name);
     }
 
     public function hasTools(): bool
     {
         $this->restoreIfNeeded();
 
-        return $this->inner->hasTools();
+        return [] !== $this->getTools()->references;
     }
 
     public function registerTool(Tool $tool, callable|array|string $handler): ToolReference
@@ -91,11 +99,16 @@ final class RestoringRegistryDecorator implements RegistryInterface
         $this->inner->unregisterPrompt($name);
     }
 
+    public function publishesListChanges(): bool
+    {
+        return $this->inner->publishesListChanges();
+    }
+
     public function hasTool(string $name): bool
     {
         $this->restoreIfNeeded();
 
-        return $this->inner->hasTool($name);
+        return $this->inner->hasTool($name) && $this->isVisible($name);
     }
 
     public function hasResource(string $uri): bool
@@ -158,9 +171,22 @@ final class RestoringRegistryDecorator implements RegistryInterface
         return $this->inner->getPrompt($name);
     }
 
+    public function reset(): void
+    {
+        $this->restored = false;
+    }
+
+    private function isVisible(string $name): bool
+    {
+        return match ($this->modeResolver->current()) {
+            DiscoveryMode::Static => !$this->inner->hasTool($name) || DynamicToolRegistry::HANDLER !== $this->inner->getTool($name)->handler,
+            DiscoveryMode::Dynamic => InvokeApiOperation::TOOL_NAME !== $name,
+        };
+    }
+
     private function restoreIfNeeded(): void
     {
-        if ($this->restored) {
+        if ($this->restored || DiscoveryMode::Static === $this->modeResolver->current()) {
             return;
         }
         $this->restored = true;

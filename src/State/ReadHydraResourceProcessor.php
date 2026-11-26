@@ -10,11 +10,15 @@ use App\JsonLd\Expander;
 use App\JsonLd\JsonLdDocument;
 use App\JsonLd\Vocab;
 use App\Mcp\AffordanceStore;
+use App\Mcp\DiscoveryMode;
+use App\Mcp\DiscoveryModeResolver;
 use App\Mcp\DynamicToolRegistry;
 use App\Mcp\HydraResponseParser;
+use App\Mcp\ResourceDescriber;
 use Mcp\Schema\Content\TextContent;
 use Mcp\Schema\Notification\ToolListChangedNotification;
 use Mcp\Schema\Result\CallToolResult;
+use Mcp\Server\ClientGateway;
 use Mcp\Server\Session\SessionInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -28,6 +32,8 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
         private readonly DynamicToolRegistry $dynamicToolRegistry,
         private readonly AffordanceStore $affordanceStore,
         private readonly LoggerInterface $logger,
+        private readonly DiscoveryModeResolver $modeResolver,
+        private readonly ResourceDescriber $describer,
     ) {
     }
 
@@ -36,6 +42,10 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
         $session = $context['mcp_session'];
         $uri = $data->uri;
         $this->logger->info('Navigating to Hydra resource', ['uri' => $uri]);
+
+        if (DiscoveryMode::Static === $this->modeResolver->forSession($session)) {
+            return $this->describe($uri);
+        }
 
         try {
             $response = $this->hydraClient->request('GET', $uri);
@@ -83,16 +93,28 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
             }
         }
 
-        // If new tools were registered, notify the client via Fiber::suspend
         if ($newToolsRegistered) {
-            \Fiber::suspend([
-                'type' => 'notification',
-                'notification' => new ToolListChangedNotification(),
-            ]);
+            new ClientGateway($session)->notify(new ToolListChangedNotification());
         }
 
         return new CallToolResult(
             [new TextContent($content)],
+        );
+    }
+
+    private function describe(string $uri): CallToolResult
+    {
+        try {
+            $described = $this->describer->describe($uri)->toArray();
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to fetch Hydra resource', ['uri' => $uri, 'error' => $e->getMessage()]);
+
+            return CallToolResult::error([new TextContent("Error fetching {$uri}: {$e->getMessage()}")]);
+        }
+
+        return new CallToolResult(
+            [new TextContent(json_encode($described, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES))],
+            structuredContent: $described,
         );
     }
 

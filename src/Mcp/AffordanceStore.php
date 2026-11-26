@@ -9,16 +9,18 @@ use Mcp\Server\Session\SessionInterface;
 use Mcp\Server\Session\SessionStoreInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Uid\Uuid;
+use Symfony\Contracts\Service\ResetInterface;
 
 /**
  * Persists affordance configuration (URI, params, method) per MCP session.
+ * The in-memory caches belong to the current request only and are cleared on reset.
  * Uses the MCP session's built-in key-value storage instead of file I/O.
  *
  * Write methods require the active SessionInterface (from handler context).
  * Read methods accept an optional session — when null, a read-only session
  * is resolved from the session store using the Mcp-Session-Id header.
  */
-final class AffordanceStore
+final class AffordanceStore implements ResetInterface
 {
     private const KEY_AFFORDANCES = 'hydra.affordances';
     private const KEY_DOCS_URL = 'hydra.docs_url';
@@ -152,6 +154,13 @@ final class AffordanceStore
         }
 
         return $result;
+    }
+
+    public function reset(): void
+    {
+        $this->affordancesCache = [];
+        $this->docsUrlCache = null;
+        $this->docsCacheCache = null;
     }
 
     /**

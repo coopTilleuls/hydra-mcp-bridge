@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Mcp\DiscoveryMode;
+use App\Mcp\DiscoveryModeResolver;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 
 /**
  * Functional tests for the MCP JSON-RPC endpoint.
@@ -202,6 +206,189 @@ class McpEndpointTest extends WebTestCase
         return implode("\n", $texts);
     }
 
+    private function statelessRpc(int $id, string $method, array $params = []): array
+    {
+        $params['_meta'] = [
+            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities' => new \stdClass(),
+            'io.modelcontextprotocol/clientInfo' => ['name' => 'phpunit-test', 'version' => '1.0'],
+        ];
+
+        $headers = [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_ACCEPT' => 'application/json, text/event-stream',
+            'HTTP_MCP_PROTOCOL_VERSION' => '2026-07-28',
+            'HTTP_MCP_METHOD' => $method,
+        ];
+        if (isset($params['name'])) {
+            $headers['HTTP_MCP_NAME'] = $params['name'];
+        }
+
+        $this->browser->request('POST', '/mcp', [], [], $headers, json_encode([
+            'jsonrpc' => '2.0',
+            'id' => $id,
+            'method' => $method,
+            'params' => $params,
+        ]));
+
+        $response = $this->browser->getResponse();
+        $this->assertNull($response->headers->get('Mcp-Session-Id'), 'A 2026-07-28 answer must not mint a session');
+
+        $body = $response->getContent();
+        if (false === $body) {
+            ob_start();
+            $response->sendContent();
+            $body = ob_get_clean();
+        }
+
+        if (str_contains($response->headers->get('Content-Type', ''), 'text/event-stream')) {
+            return $this->parseLastSseResponse($body, $id);
+        }
+
+        return json_decode($body, true);
+    }
+
+    private function statelessToolNames(int $id): array
+    {
+        $names = array_column($this->statelessRpc($id, 'tools/list')['result']['tools'] ?? [], 'name');
+        sort($names);
+
+        return $names;
+    }
+
+    private function operationsByMethod(array $operations): array
+    {
+        return array_column($operations, null, 'method');
+    }
+
+    public function testStatelessToolListNeverChanges(): void
+    {
+        $expected = ['invoke_api_operation', 'read_api_resource'];
+
+        $this->assertSame($expected, $this->statelessToolNames(1));
+
+        $this->statelessRpc(2, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/']]);
+        $this->assertSame($expected, $this->statelessToolNames(3));
+
+        $this->statelessRpc(4, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);
+        $this->assertSame($expected, $this->statelessToolNames(5));
+    }
+
+    public function testStatelessCollectionReadReturnsOperationsWithSchemas(): void
+    {
+        $response = $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);
+
+        $this->assertArrayHasKey('result', $response, json_encode($response));
+        $this->assertFalse($response['result']['isError'] ?? false, json_encode($response['result']));
+        $structured = $response['result']['structuredContent'] ?? null;
+        $this->assertIsArray($structured);
+        $this->assertSame('/books', $structured['resource']['@id']);
+        $this->assertSame($structured, json_decode($this->extractText($response), true), 'Text content mirrors structuredContent for clients that only read text');
+
+        $operations = $this->operationsByMethod($structured['operations']);
+        $this->assertSame('/books', $operations['GET']['uri']);
+        $this->assertArrayHasKey('title', $operations['GET']['inputSchema']['properties'], 'Search mapping exposed as GET input');
+        $this->assertSame('/books', $operations['POST']['uri']);
+        $this->assertContains('book', $operations['POST']['inputSchema']['required']);
+        $this->assertArrayNotHasKey('uri', $operations['POST']['inputSchema']['properties']);
+
+        $memberOperations = $this->operationsByMethod($structured['memberOperations']);
+        $this->assertArrayHasKey('PATCH', $memberOperations);
+        $this->assertArrayHasKey('DELETE', $memberOperations);
+        $this->assertArrayHasKey('condition', $memberOperations['PATCH']['inputSchema']['properties']);
+        $this->assertArrayNotHasKey('required', $memberOperations['PATCH']['inputSchema']);
+    }
+
+    public function testStatelessInlineOperationsOverrideClassOperations(): void
+    {
+        $upstream = new MockHttpClient(static function (string $method, string $url): MockResponse {
+            $docsLink = ['link' => ['<https://localhost/docs.jsonld>; rel="http://www.w3.org/ns/hydra/core#apiDocumentation"']];
+
+            return match ($url) {
+                'https://localhost/orders/1' => new MockResponse(json_encode([
+                    '@context' => ['@vocab' => 'https://localhost/docs.jsonld#', 'hydra' => 'http://www.w3.org/ns/hydra/core#'],
+                    '@id' => '/orders/1',
+                    '@type' => 'Order',
+                    'status' => 'shipped',
+                    'hydra:operation' => [
+                        ['@type' => 'hydra:Operation', 'hydra:method' => 'GET', 'hydra:title' => 'getOrder'],
+                        ['@type' => 'hydra:Operation', 'hydra:method' => 'POST', 'hydra:title' => 'returnOrder', 'hydra:description' => 'Return a shipped order'],
+                    ],
+                ]), ['response_headers' => $docsLink]),
+                'https://localhost/docs.jsonld' => new MockResponse(json_encode([
+                    '@context' => ['@vocab' => 'http://www.w3.org/ns/hydra/core#'],
+                    '@id' => '/docs.jsonld',
+                    '@type' => 'ApiDocumentation',
+                    'supportedClass' => [[
+                        '@id' => '#Order',
+                        '@type' => 'Class',
+                        'title' => 'Order',
+                        'supportedOperation' => [
+                            ['@type' => 'Operation', 'method' => 'GET', 'title' => 'getOrder'],
+                            ['@type' => 'Operation', 'method' => 'PATCH', 'title' => 'patchOrder'],
+                            ['@type' => 'Operation', 'method' => 'DELETE', 'title' => 'deleteOrder'],
+                        ],
+                    ]],
+                ])),
+                default => new MockResponse('', ['http_code' => 404]),
+            };
+        }, 'https://localhost');
+        static::getContainer()->set('hydra.client', $upstream);
+
+        $response = $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/orders/1']]);
+
+        $this->assertArrayHasKey('result', $response, json_encode($response));
+        $operations = $this->operationsByMethod($response['result']['structuredContent']['operations']);
+        $this->assertEqualsCanonicalizing(['GET', 'POST'], array_keys($operations), 'Inline operations replace the class-level set of this resource');
+        $this->assertSame('returnOrder', $operations['POST']['title']);
+        $this->assertSame('/orders/1', $operations['POST']['uri']);
+    }
+
+    public function testStatelessInvocationRejectsInvalidPayloadWithoutUpstreamCall(): void
+    {
+        $before = $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);
+        $totalBefore = $before['result']['structuredContent']['resource']['hydra:totalItems'];
+
+        $response = $this->statelessRpc(2, 'tools/call', [
+            'name' => 'invoke_api_operation',
+            'arguments' => [
+                'uri' => '/books',
+                'method' => 'POST',
+                'payload' => ['condition' => 'https://schema.org/NewCondition'],
+            ],
+        ]);
+
+        $this->assertArrayHasKey('result', $response, json_encode($response));
+        $this->assertTrue($response['result']['isError'] ?? false, 'Invalid payload must be a tool error');
+        $this->assertStringContainsString('book', $this->extractText($response), 'Violation names the missing required property');
+
+        $after = $this->statelessRpc(3, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);
+        $this->assertSame($totalBefore, $after['result']['structuredContent']['resource']['hydra:totalItems'], 'No book was created upstream');
+    }
+
+    public function testStatelessInvocationUpdatesMember(): void
+    {
+        $collection = $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books?title=Hyperion']]);
+        $member = $collection['result']['structuredContent']['resource']['hydra:member'][0];
+        $originalCondition = $member['condition'];
+        $target = 'https://schema.org/NewCondition' === $originalCondition ? 'https://schema.org/DamagedCondition' : 'https://schema.org/NewCondition';
+
+        $patch = $this->statelessRpc(2, 'tools/call', [
+            'name' => 'invoke_api_operation',
+            'arguments' => ['uri' => $member['@id'], 'method' => 'PATCH', 'payload' => ['condition' => $target]],
+        ]);
+        $this->assertFalse($patch['result']['isError'] ?? false, $this->extractText($patch));
+
+        $read = $this->statelessRpc(3, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => $member['@id']]]);
+        $this->assertSame($target, $read['result']['structuredContent']['resource']['condition']);
+        $this->assertArrayHasKey('PATCH', $this->operationsByMethod($read['result']['structuredContent']['operations']), 'A member read lists its class-level operations');
+
+        $this->statelessRpc(4, 'tools/call', [
+            'name' => 'invoke_api_operation',
+            'arguments' => ['uri' => $member['@id'], 'method' => 'PATCH', 'payload' => ['condition' => $originalCondition]],
+        ]);
+    }
+
     // =========================================================================
     // Test: Phase 1 — Entrypoint registers no tools
     // =========================================================================
@@ -253,16 +440,8 @@ class McpEndpointTest extends WebTestCase
             ],
         ]));
 
-        $response = $this->browser->getResponse();
-        $body = $response->getContent();
-        if (false === $body) {
-            ob_start();
-            $response->sendContent();
-            $body = ob_get_clean();
-        }
-
-        // Verify tools were discovered (SSE notification is an implementation detail
-        // that may not surface through the test client's output buffering)
+        $body = $this->browser->getInternalResponse()->getContent();
+        $this->assertStringContainsString('"method":"notifications\\/tools\\/list_changed"', $body, 'Clients only refetch tools/list on this notification');
 
         // tools/list should now have CRUD tools for books
         $tools = $this->getToolsByName($sid, 3);
@@ -272,6 +451,69 @@ class McpEndpointTest extends WebTestCase
         // Check for at least some CRUD tools
         $bookTools = array_filter(array_keys($tools), fn ($name) => str_contains($name, 'book'));
         $this->assertGreaterThanOrEqual(3, \count($bookTools), 'At least 3 book-related tools discovered');
+    }
+
+    // A FrankenPHP worker keeps the kernel between requests and only resets services; disableReboot() does the same.
+    public function testDynamicToolsDoNotLeakAcrossSessionsInWorkerMode(): void
+    {
+        $this->browser->disableReboot();
+
+        $first = $this->initializeSession();
+        $this->discoverTools($first, '/books');
+        $this->assertArrayHasKey('search_books', $this->getToolsByName($first, 1));
+
+        $second = $this->initializeSession();
+        $this->assertSame(['read_api_resource'], array_keys($this->getToolsByName($second, 2)));
+
+        $call = $this->jsonRpc($second, 3, 'tools/call', ['name' => 'search_books', 'arguments' => ['title' => 'Hyperion']]);
+        $this->assertTrue(isset($call['error']) || ($call['result']['isError'] ?? false), 'A tool discovered by another session must not run');
+
+        $this->assertArrayHasKey('search_books', $this->getToolsByName($first, 4), 'The discovering session keeps its tools');
+        $own = $this->jsonRpc($first, 5, 'tools/call', ['name' => 'search_books', 'arguments' => ['title' => 'Hyperion']]);
+        $this->assertFalse($own['result']['isError'] ?? true);
+        $this->assertStringContainsString('Hyperion', $this->extractText($own));
+    }
+
+    public function testDynamicModeInitializeDescribesTypedTools(): void
+    {
+        $instructions = $this->initializeInstructions();
+
+        $this->assertStringContainsString('New tools (create, read, update, delete, search) appear automatically', $instructions);
+        $this->assertStringNotContainsString('invoke_api_operation', $instructions);
+    }
+
+    public function testStaticLegacyModeInitializeDescribesInvokeApiOperation(): void
+    {
+        static::getContainer()->set(DiscoveryModeResolver::class, new DiscoveryModeResolver(DiscoveryMode::Static));
+
+        $instructions = $this->initializeInstructions();
+
+        $this->assertStringContainsString('invoke_api_operation', $instructions);
+        $this->assertStringNotContainsString('appear automatically', $instructions);
+    }
+
+    public function testDiscoverDescribesInvokeApiOperation(): void
+    {
+        $instructions = $this->statelessRpc(1, 'server/discover')['result']['instructions'] ?? '';
+
+        $this->assertStringContainsString('invoke_api_operation', $instructions);
+        $this->assertStringNotContainsString('appear automatically', $instructions);
+    }
+
+    private function initializeInstructions(): string
+    {
+        $this->browser->request('POST', '/mcp', [], [], ['CONTENT_TYPE' => 'application/json'], json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 0,
+            'method' => 'initialize',
+            'params' => [
+                'protocolVersion' => '2025-06-18',
+                'capabilities' => new \stdClass(),
+                'clientInfo' => ['name' => 'phpunit-test', 'version' => '1.0'],
+            ],
+        ]));
+
+        return json_decode($this->browser->getResponse()->getContent(), true)['result']['instructions'] ?? '';
     }
 
     // =========================================================================

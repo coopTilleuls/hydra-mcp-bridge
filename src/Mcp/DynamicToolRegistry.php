@@ -7,8 +7,13 @@ namespace App\Mcp;
 use Mcp\Capability\RegistryInterface;
 use Mcp\Schema\Tool;
 use Mcp\Server\Session\SessionInterface;
+use Symfony\Contracts\Service\ResetInterface;
 
-final class DynamicToolRegistry
+/**
+ * The registry is shared by every request a worker serves, so tools registered for one session are
+ * removed on reset; the next request restores its own session's tools from the AffordanceStore.
+ */
+final class DynamicToolRegistry implements ResetInterface
 {
     /**
      * Handler string stored in the registry's ToolReference.
@@ -52,6 +57,14 @@ final class DynamicToolRegistry
         foreach ($this->store->all($session) as $affordance) {
             $this->registerTool($affordance);
         }
+    }
+
+    public function reset(): void
+    {
+        foreach (array_keys($this->registeredTools) as $name) {
+            $this->registry->unregisterTool($name);
+        }
+        $this->registeredTools = [];
     }
 
     private function registerTool(StoredAffordance $affordance): void

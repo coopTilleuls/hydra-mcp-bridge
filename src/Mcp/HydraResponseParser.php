@@ -282,44 +282,255 @@ final class HydraResponseParser
             return $this->assembleSchema([], [], $method, $needsUri);
         }
 
-        $class = $this->resolveClass($classId, $classMap);
+        [$properties, $required] = $this->collectBodyProperties($this->resolveClass($classId, $classMap), $method);
+
+        return $this->assembleSchema($properties, $required, $method, $needsUri);
+    }
+
+    /**
+     * @return array{0: array<string, array<string, string>>, 1: list<string>}
+     */
+    private function collectBodyProperties(?JsonLdNode $class, string $method): array
+    {
         $properties = [];
         $required = [];
 
-        if (null !== $class) {
-            foreach ($class->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
-                $writeable = $supportedProp->value(Vocab::WRITEABLE);
-                if (false === $writeable) {
+        if (null === $class) {
+            return [$properties, $required];
+        }
+
+        foreach ($class->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
+            $writeable = $supportedProp->value(Vocab::WRITEABLE);
+            if (false === $writeable) {
+                continue;
+            }
+
+            $propDef = $supportedProp->first(Vocab::PROPERTY);
+            $propName = $supportedProp->value(Vocab::TITLE)
+                ?? $propDef?->value(Vocab::LABEL);
+
+            if (null === $propName || !\is_string($propName)) {
+                continue;
+            }
+
+            $range = $propDef ? $this->getFirstRangeId($propDef) : null;
+            $propSchema = ['type' => $this->iriToJsonSchemaType($range)];
+            $propDescription = $supportedProp->value(Vocab::DESCRIPTION);
+            if (null !== $propDescription) {
+                $propSchema['description'] = $propDescription;
+            }
+
+            $properties[$propName] = $propSchema;
+
+            // PATCH is a partial update — no properties should be required
+            if ('PATCH' !== $method && true === $supportedProp->value(Vocab::REQUIRED)) {
+                $required[] = $propName;
+            }
+        }
+
+        return [$properties, $required];
+    }
+
+    // --- Stateless descriptions: operations described in a result, invoked by URI ---
+
+    /**
+     * Operations the documentation declares for the first of the candidate classes it knows.
+     * "collection" operations target the collection URI, "member" operations target each member URI.
+     *
+     * @param list<string> $classCandidates class IRIs or local names, most specific first
+     *
+     * @return array{collection: list<OperationDescription>, member: list<OperationDescription>}
+     */
+    public function describeClassOperations(JsonLdDocument $docs, array $classCandidates): array
+    {
+        $described = ['collection' => [], 'member' => []];
+        $docsNode = $docs->first();
+        if (null === $docsNode) {
+            return $described;
+        }
+
+        $classMap = $this->buildClassMap($docsNode);
+        $class = null;
+        foreach ($classCandidates as $candidate) {
+            if (null !== $class = $this->resolveClass($candidate, $classMap)) {
+                break;
+            }
+        }
+
+        if (null === $class) {
+            return $described;
+        }
+
+        $classId = $class->nodeId();
+
+        foreach ($class->all(Vocab::SUPPORTED_OPERATION) as $operation) {
+            $description = $this->describeOperation($operation, $classId, $classMap);
+            if (null !== $description) {
+                $described['POST' === $description->method ? 'collection' : 'member'][] = $description;
+            }
+        }
+
+        foreach ($classMap as $entrypointClass) {
+            if ('Entrypoint' !== $entrypointClass->value(Vocab::TITLE)) {
+                continue;
+            }
+
+            foreach ($entrypointClass->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
+                $property = $supportedProp->first(Vocab::PROPERTY);
+                $targetClassId = null !== $property ? $this->resolveTargetClass($property) : null;
+                if (null === $targetClassId || $this->localName($targetClassId) !== $this->localName($classId ?? '')) {
                     continue;
                 }
 
-                $propDef = $supportedProp->first(Vocab::PROPERTY);
-                $propName = $supportedProp->value(Vocab::TITLE)
-                    ?? $propDef?->value(Vocab::LABEL);
-
-                if (null === $propName || !\is_string($propName)) {
-                    continue;
-                }
-
-                $range = $propDef ? $this->getFirstRangeId($propDef) : null;
-                $propType = $this->iriToJsonSchemaType($range);
-
-                $propSchema = ['type' => $propType];
-                $propDescription = $supportedProp->value(Vocab::DESCRIPTION);
-                if (null !== $propDescription) {
-                    $propSchema['description'] = $propDescription;
-                }
-
-                $properties[$propName] = $propSchema;
-
-                // PATCH is a partial update — no properties should be required
-                if ('PATCH' !== $method && true === $supportedProp->value(Vocab::REQUIRED)) {
-                    $required[] = $propName;
+                foreach ($property->all(Vocab::SUPPORTED_OPERATION) as $operation) {
+                    $description = $this->describeOperation($operation, $targetClassId, $classMap);
+                    if (null !== $description) {
+                        $described['collection'][] = $description;
+                    }
                 }
             }
         }
 
-        return $this->assembleSchema($properties, $required, $method, $needsUri);
+        return $described;
+    }
+
+    /**
+     * Inline hydra:operation of the resource. An expects given inline with its supportedProperty
+     * is read as is, one given by reference is resolved against the documentation when available.
+     *
+     * @return list<OperationDescription>
+     */
+    public function describeInlineOperations(JsonLdDocument $doc, ?JsonLdDocument $docs = null): array
+    {
+        $node = $doc->first();
+        if (null === $node) {
+            return [];
+        }
+
+        $docsNode = $docs?->first();
+        $classMap = null !== $docsNode ? $this->buildClassMap($docsNode) : [];
+        $described = [];
+
+        foreach ($node->all(Vocab::OPERATION_PROP) as $operation) {
+            $description = $this->describeOperation($operation, null, $classMap);
+            if (null !== $description) {
+                $described[] = $description;
+            }
+        }
+
+        return $described;
+    }
+
+    /**
+     * The resource's hydra:search template as a GET operation whose input is the template mapping.
+     */
+    public function describeSearch(JsonLdDocument $doc): ?OperationDescription
+    {
+        $node = $doc->first();
+        $search = $node?->first(Vocab::SEARCH);
+        if (null === $search) {
+            return null;
+        }
+
+        $inputSchema = $this->searchSchema($search);
+        if (null === $inputSchema) {
+            return null;
+        }
+
+        return new OperationDescription(
+            method: 'GET',
+            title: 'search',
+            description: 'Search '.$this->deriveResourceName($node).' by: '.implode(', ', array_keys($inputSchema['properties'])),
+            inputSchema: $inputSchema,
+        );
+    }
+
+    /**
+     * @param array<string, JsonLdNode> $classMap
+     */
+    private function describeOperation(JsonLdNode $operation, ?string $defaultExpects, array $classMap): ?OperationDescription
+    {
+        $method = $operation->value(Vocab::METHOD);
+        if (!\is_string($method)) {
+            return null;
+        }
+
+        $method = strtoupper($method);
+        $title = $operation->value(Vocab::TITLE);
+        $description = $operation->value(Vocab::DESCRIPTION) ?? $title ?? $method;
+
+        if ('GET' === $method || 'DELETE' === $method) {
+            return new OperationDescription($method, $title, $description, ['type' => 'object', 'properties' => new \stdClass()]);
+        }
+
+        $expects = $operation->first(Vocab::EXPECTS);
+        $expectsClass = null !== $expects && [] !== $expects->all(Vocab::SUPPORTED_PROPERTY_PROP)
+            ? $expects
+            : $this->resolveClass($operation->id(Vocab::EXPECTS) ?? $defaultExpects, $classMap);
+
+        [$properties, $required] = $this->collectBodyProperties($expectsClass, $method);
+
+        $inputSchema = ['type' => 'object', 'properties' => [] === $properties ? new \stdClass() : $properties];
+        if ([] !== $required) {
+            $inputSchema['required'] = $required;
+        }
+
+        return new OperationDescription($method, $title, $description, $inputSchema);
+    }
+
+    /**
+     * @return array<string, JsonLdNode>
+     */
+    private function buildClassMap(JsonLdNode $docsNode): array
+    {
+        $classMap = [];
+        foreach ($docsNode->all(Vocab::SUPPORTED_CLASS) as $class) {
+            $classId = $class->nodeId();
+            if (null !== $classId) {
+                $classMap[$classId] = $class;
+            }
+        }
+
+        return $classMap;
+    }
+
+    /**
+     * @return array{type: 'object', properties: array<string, array<string, string>>, required?: list<string>}|null
+     */
+    private function searchSchema(JsonLdNode $search): ?array
+    {
+        if (null === $search->value(Vocab::TEMPLATE)) {
+            return null;
+        }
+
+        $properties = [];
+        $required = [];
+        foreach ($search->all(Vocab::MAPPING) as $mapping) {
+            $variable = $mapping->value(Vocab::VARIABLE);
+            if (null === $variable) {
+                continue;
+            }
+
+            $properties[$variable] = [
+                'type' => 'string',
+                'description' => "Filter by {$variable}",
+            ];
+
+            if ($mapping->value(Vocab::REQUIRED) ?? false) {
+                $required[] = $variable;
+            }
+        }
+
+        if ([] === $properties) {
+            return null;
+        }
+
+        $inputSchema = ['type' => 'object', 'properties' => $properties];
+        if ([] !== $required) {
+            $inputSchema['required'] = $required;
+        }
+
+        return $inputSchema;
     }
 
     /**
@@ -416,51 +627,17 @@ final class HydraResponseParser
             return [];
         }
 
-        $template = $search->value(Vocab::TEMPLATE);
-        $mappings = $search->all(Vocab::MAPPING);
-
-        if (null === $template || [] === $mappings) {
+        $inputSchema = $this->searchSchema($search);
+        if (null === $inputSchema) {
             return [];
         }
 
         $resourceName = $this->deriveResourceName($node);
         $toolName = 'search_'.$resourceName;
 
-        $properties = [];
-        $required = [];
-        foreach ($mappings as $mapping) {
-            $variable = $mapping->value(Vocab::VARIABLE);
-            $isRequired = $mapping->value(Vocab::REQUIRED) ?? false;
-
-            if (null === $variable) {
-                continue;
-            }
-
-            $properties[$variable] = [
-                'type' => 'string',
-                'description' => "Filter by {$variable}",
-            ];
-
-            if ($isRequired) {
-                $required[] = $variable;
-            }
-        }
-
-        if ([] === $properties) {
-            return [];
-        }
-
-        $inputSchema = [
-            'type' => 'object',
-            'properties' => $properties,
-        ];
-        if ([] !== $required) {
-            $inputSchema['required'] = $required;
-        }
-
         // Use the compact @id for the collection URI (relative path)
-        $collectionUri = $compactJsonLd->{'@id'} ?? $template;
-        $paramNames = array_keys($properties);
+        $collectionUri = $compactJsonLd->{'@id'} ?? $search->value(Vocab::TEMPLATE);
+        $paramNames = array_keys($inputSchema['properties']);
 
         return [
             new StoredAffordance(

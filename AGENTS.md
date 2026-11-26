@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A dynamic MCP (Model Context Protocol) gateway that bridges Hydra/HATEOAS APIs with MCP clients. It exposes one static tool (`read_hydra_resource`) and dynamically discovers additional tools at runtime by parsing Hydra hypermedia controls (JSON-LD).
+A dynamic MCP (Model Context Protocol) gateway that bridges Hydra/HATEOAS APIs with MCP clients. It exposes one static tool (`read_api_resource`) and dynamically discovers additional tools at runtime by parsing Hydra hypermedia controls (JSON-LD).
 
 ## Commands
 
@@ -43,9 +43,13 @@ The gateway discovers tools lazily as the MCP client navigates the Hydra API:
 
 After registering new tools, `Fiber::suspend()` sends a `ToolListChangedNotification` to the MCP client.
 
+### Static Mode (MCP 2026-07-28)
+
+2026-07-28 forbids a per-connection tool list and removes sessions, so those requests get a fixed `tools/list`: `read_api_resource` and `invoke_api_operation`. `ResourceDescriber` returns the resource with its `operations` (class-level from `docs.jsonld`, replaced by inline `hydra:operation` when present, `hydra:search` as `GET`) and, for collections, `memberOperations`. `InvokeApiOperationProcessor` re-describes the target URI, validates the payload against the operation schema, then calls upstream. `docs.jsonld` is cached app-wide by URL (`ApiDocumentation`). `DiscoveryModeResolver` picks the mode: static for 2026-07-28, `HYDRA_LEGACY_DISCOVERY` (`dynamic` default) for older clients.
+
 ### Request Flow
 
-1. MCP client calls `read_hydra_resource(uri)` → `ReadHydraResourceProcessor`
+1. MCP client calls `read_api_resource(uri)` → `ReadHydraResourceProcessor`
 2. Processor fetches the upstream Hydra resource, expands JSON-LD via `Expander`
 3. `HydraResponseParser` extracts affordances based on response type (entrypoint/collection/resource)
 4. `DynamicToolRegistry` registers new tools in the MCP `RegistryInterface` with handler string `DynamicToolRegistry::HANDLER`
@@ -64,6 +68,7 @@ After registering new tools, `Fiber::suspend()` sends a `ToolListChangedNotifica
 ### DI Wiring Notes
 
 - `RestoringRegistryDecorator` is excluded from auto-registration in `services.yaml` and manually wired as a decorator of `mcp.registry` with `decoration_priority: 10`
+- The MCP registry is shared by every request a FrankenPHP worker serves. `DynamicToolRegistry`, `RestoringRegistryDecorator` and `AffordanceStore` implement `ResetInterface`: dynamic tools are unregistered and caches cleared between requests, then restored from the current session only. Without it a new session inherits tools (with stale URIs) discovered by others. Covered by `testDynamicToolsDoNotLeakAcrossSessionsInWorkerMode` (`disableReboot()` mimics the worker).
 - `hydra.client` is a scoped Symfony HTTP client configured in `config/packages/framework.yaml` with `base_uri` from `HYDRA_API_BASE_URL`
 - MCP config in `config/packages/mcp.yaml`: HTTP+stdio transports, file-based sessions in `%kernel.cache_dir%/mcp`
 
