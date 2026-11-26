@@ -48,6 +48,10 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Goal: keep March condition B comparable by changing only `docs.jsonld`.
 - Dropped in favour of upgrading everything to the latest stack (API Platform 5.1-dev, Symfony 8.1, PHP 8.5, FrankenPHP 1.14) and rerunning every condition. The old B results stop being a baseline.
 
+### Entrypoint links after the API Platform 5 upgrade
+- Finding (A smoke, 2026-11-26, 7/12): no model could create a book. API Platform 5 describes an entrypoint link's member class with `hydra:memberAssertion` (`rdf:type` → `#Book`) on a `hydra:Collection` range. Before, it used `owl:equivalentClass`/`owl:allValuesFrom`, the only shape the gateway knew, so `post_book` was never registered.
+- Kept: resolve the member class from `hydra:memberAssertion` (Hydra §5.2), keeping the owl path for older versions. Link-bound `post_review` passed on all three models in the same smoke.
+
 ## 2026-11 — Infrastructure
 
 ### Pinning FrankenPHP 1.11 (abandoned)
