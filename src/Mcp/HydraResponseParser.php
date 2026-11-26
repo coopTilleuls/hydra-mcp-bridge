@@ -83,7 +83,7 @@ final class HydraResponseParser
         foreach ($node->all(Vocab::MEMBER_ASSERTION) as $assertion) {
             $property = $assertion->id(Vocab::PROPERTY);
             if (Vocab::RDF_TYPE === $property) {
-                $object = $assertion->id(Vocab::HYDRA.'object');
+                $object = $assertion->id(Vocab::OBJECT);
                 if (null !== $object) {
                     return $object;
                 }
@@ -578,10 +578,20 @@ final class HydraResponseParser
     }
 
     /**
-     * Resolve the target class @id from an expanded property's rdfs:range.
+     * Resolve the target class @id from an expanded property's hydra:memberAssertion, falling back to rdfs:range.
      */
     private function resolveTargetClass(JsonLdNode $property): ?string
     {
+        // Hydra Core 5.2: a rdf:type member assertion makes every member an instance of its object
+        foreach ($property->all(Vocab::MEMBER_ASSERTION) as $assertion) {
+            if (Vocab::RDF_TYPE === $assertion->id(Vocab::PROPERTY)) {
+                $object = $assertion->id(Vocab::OBJECT);
+                if (null !== $object) {
+                    return $object;
+                }
+            }
+        }
+
         foreach ($property->all(Vocab::RANGE) as $rangeEntry) {
             $id = $rangeEntry->nodeId();
             if (\is_string($id) && !str_ends_with($id, 'Collection')) {

@@ -539,6 +539,25 @@ class McpEndpointTest extends WebTestCase
         $this->assertNotContains('https://localhost/books/hyperion/reviews', $posts, 'A review meant for Dune must not land on Hyperion');
     }
 
+    public function testEntrypointLinkWithMemberAssertionIsDiscoveredFromTheCollection(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls, memberAssertion: true));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeSession();
+        $this->discoverTools($sid, '/books');
+
+        $tools = $this->getToolsByName($sid, 1);
+        $this->assertArrayHasKey('post_book', $tools);
+        $this->assertArrayHasKey('get_book_collection', $tools);
+
+        $this->jsonRpc($sid, 2, 'tools/call', ['name' => 'post_book', 'arguments' => ['title' => 'Ilium']]);
+
+        $posts = array_column(array_values(array_filter($calls, static fn (array $call): bool => 'POST' === $call[0])), 1);
+        $this->assertSame(['https://localhost/books'], $posts);
+    }
+
     public function testLinkBoundOperationIsDiscoveredFromTheParentCollection(): void
     {
         $calls = [];
@@ -622,7 +641,7 @@ class McpEndpointTest extends WebTestCase
      *
      * @param list<array{0: string, 1: string, 2: string}> $calls
      */
-    private function bookReviewsUpstream(array &$calls, bool $phantomEntrypointReview = false): MockHttpClient
+    private function bookReviewsUpstream(array &$calls, bool $phantomEntrypointReview = false, bool $memberAssertion = false): MockHttpClient
     {
         $docsLink = ['response_headers' => ['link' => ['<https://localhost/docs.jsonld>; rel="http://www.w3.org/ns/hydra/core#apiDocumentation"']]];
         $book = static fn (string $id, string $title, array $extra = []): string => json_encode([
@@ -651,7 +670,7 @@ class McpEndpointTest extends WebTestCase
             ],
         ]);
 
-        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$calls, $docsLink, $book, $reviews, $phantomEntrypointReview): MockResponse {
+        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$calls, $docsLink, $book, $reviews, $phantomEntrypointReview, $memberAssertion): MockResponse {
             $calls[] = [$method, $url, $options['body'] ?? ''];
 
             if ('GET' !== $method) {
@@ -665,7 +684,7 @@ class McpEndpointTest extends WebTestCase
                     '@type' => 'Entrypoint',
                     'book' => '/books',
                 ]), $docsLink),
-                'https://localhost/docs.jsonld' => new MockResponse(json_encode(self::bookReviewsDocs($phantomEntrypointReview))),
+                'https://localhost/docs.jsonld' => new MockResponse(json_encode(self::bookReviewsDocs($phantomEntrypointReview, $memberAssertion))),
                 'https://localhost/contexts/Entrypoint' => new MockResponse(json_encode(['@context' => [
                     '@vocab' => 'https://localhost/docs.jsonld#',
                     'hydra' => 'http://www.w3.org/ns/hydra/core#',
@@ -707,7 +726,7 @@ class McpEndpointTest extends WebTestCase
         }, 'https://localhost');
     }
 
-    private static function bookReviewsDocs(bool $phantomEntrypointReview): array
+    private static function bookReviewsDocs(bool $phantomEntrypointReview, bool $memberAssertion = false): array
     {
         $entrypointCollections = $phantomEntrypointReview ? ['Book', 'Review'] : ['Book'];
         $entrypointLink = static fn (string $class): array => [
@@ -716,9 +735,14 @@ class McpEndpointTest extends WebTestCase
                 '@id' => '#Entrypoint/'.lcfirst($class),
                 '@type' => 'Link',
                 'domain' => '#Entrypoint',
-                'range' => [
-                    ['@id' => 'Collection'],
-                    ['owl:equivalentClass' => ['owl:onProperty' => ['@id' => 'hydra:member'], 'owl:allValuesFrom' => ['@id' => "https://schema.org/{$class}"]]],
+                ...$memberAssertion ? [
+                    'range' => 'hydra:Collection',
+                    'hydra:memberAssertion' => ['property' => ['@id' => 'rdf:type'], 'hydra:object' => ['@id' => "https://schema.org/{$class}"]],
+                ] : [
+                    'range' => [
+                        ['@id' => 'Collection'],
+                        ['owl:equivalentClass' => ['owl:onProperty' => ['@id' => 'hydra:member'], 'owl:allValuesFrom' => ['@id' => "https://schema.org/{$class}"]]],
+                    ],
                 ],
                 'supportedOperation' => [
                     ['@type' => 'Operation', 'method' => 'GET', 'title' => "get{$class}Collection"],

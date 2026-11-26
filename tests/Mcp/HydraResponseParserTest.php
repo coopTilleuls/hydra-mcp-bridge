@@ -496,6 +496,83 @@ class HydraResponseParserTest extends TestCase
         $this->assertSame(['book_iri', 'body'], $byName['create_review']->inputSchema['required']);
     }
 
+    public function testEntrypointLinkOperationsResolveTheMemberClassFromMemberAssertion(): void
+    {
+        $docs = $this->expander->expand($this->memberAssertionDocs());
+
+        $byName = array_column($this->parser->extractClassOperations($docs, 'https://localhost/docs.jsonld#Book', ['book' => '/books']), null, 'name');
+
+        $this->assertArrayHasKey('post_book', $byName);
+        $this->assertSame('POST', $byName['post_book']->method);
+        $this->assertSame('/books', $byName['post_book']->uri);
+        $this->assertArrayHasKey('get_book_collection', $byName);
+        $this->assertSame('GET', $byName['get_book_collection']->method);
+        $this->assertSame('/books', $byName['get_book_collection']->uri);
+
+        $byName = array_column($this->parser->extractClassOperations($docs, 'https://localhost/docs.jsonld#Book', []), null, 'name');
+        $this->assertArrayNotHasKey('post_book', $byName, 'The entrypoint has no book link: the target is unknown');
+    }
+
+    private function memberAssertionDocs(): \stdClass
+    {
+        return json_decode(json_encode([
+            '@context' => [
+                '@vocab' => 'http://www.w3.org/ns/hydra/core#',
+                'hydra' => 'http://www.w3.org/ns/hydra/core#',
+                'rdf' => 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'rdfs' => 'http://www.w3.org/2000/01/rdf-schema#',
+                'owl' => 'http://www.w3.org/2002/07/owl#',
+                'label' => 'rdfs:label',
+                'domain' => ['@id' => 'rdfs:domain', '@type' => '@id'],
+                'range' => ['@id' => 'rdfs:range', '@type' => '@id'],
+                'expects' => ['@id' => 'expects', '@type' => '@id'],
+                'returns' => ['@id' => 'returns', '@type' => '@id'],
+            ],
+            '@id' => '/docs.jsonld',
+            '@type' => 'ApiDocumentation',
+            'supportedClass' => [
+                [
+                    '@id' => '#Book',
+                    '@type' => 'Class',
+                    'title' => 'Book',
+                    'supportedProperty' => [[
+                        '@type' => 'SupportedProperty',
+                        'property' => ['@id' => '#Book/title', 'label' => 'title', 'range' => 'http://www.w3.org/2001/XMLSchema#string'],
+                        'title' => 'title',
+                        'required' => true,
+                        'writeable' => true,
+                    ]],
+                ],
+                [
+                    '@id' => '#Entrypoint',
+                    '@type' => 'Class',
+                    'title' => 'Entrypoint',
+                    'supportedProperty' => [[
+                        '@type' => 'SupportedProperty',
+                        'property' => [
+                            '@id' => '#Entrypoint/book',
+                            '@type' => 'Link',
+                            'domain' => '#Entrypoint',
+                            'owl:maxCardinality' => 1,
+                            'range' => 'hydra:Collection',
+                            'memberAssertion' => [
+                                'property' => ['@id' => 'rdf:type'],
+                                'object' => ['@id' => '#Book'],
+                            ],
+                            'supportedOperation' => [
+                                ['@type' => ['Operation', 'https://schema.org/FindAction'], 'description' => 'Retrieves the collection of Book resources.', 'method' => 'GET', 'title' => 'getBookCollection', 'returns' => 'hydra:Collection'],
+                                ['@type' => ['Operation', 'https://schema.org/CreateAction'], 'expects' => '#Book', 'description' => 'Creates a Book resource.', 'method' => 'POST', 'title' => 'postBook', 'returns' => '#Book'],
+                            ],
+                        ],
+                        'title' => 'getBookCollection',
+                        'readable' => true,
+                        'writeable' => false,
+                    ]],
+                ],
+            ],
+        ]));
+    }
+
     private function bookReviewsDocs(): \stdClass
     {
         return json_decode(json_encode([
