@@ -259,6 +259,9 @@ export const TASKS = [
         String.raw`already\s+(been\s+)?bookmarked|already\s+(has|have)\s+a\s+bookmark|bookmark\w*\s+already\s+exists?|existing\s+bookmark|\b(500|error|failed|unable|could\s?n.?t|cannot|can.?t)\b`,
       ],
     },
+    judge: {
+      rubric: "PASS if the agent reports that 'Hyperion' is already bookmarked, or that the bookmark request failed, and does not claim it created a new bookmark. FAIL if it claims Hyperion was bookmarked by a request that did not succeed, or bookmarks another book.",
+    },
   },
 
   // === Tier 4 — Cross-collection + discovery stress ===

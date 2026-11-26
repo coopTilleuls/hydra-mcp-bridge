@@ -447,6 +447,7 @@ async function main() {
           goalResult,
           gatewayLog: ndjsonPath ? ndjsonPath.replace(PROJECT_ROOT + '/', '') : null,
           clientToolCalls: cliResult.clientToolCalls,
+          extraResources: Number(process.env.EVAL_EXTRA_RESOURCES ?? 0),
           gatewayMetrics,
           stderr: cliResult.stderr || null,
         };

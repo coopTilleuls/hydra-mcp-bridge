@@ -12,7 +12,7 @@ export const DEMO_COMPOSE_ARGS = env.EVAL_DEMO_COMPOSE_ARGS ? env.EVAL_DEMO_COMP
 export const DEMO_BASE_URL = env.EVAL_DEMO_BASE_URL || 'https://localhost';
 export const GATEWAY_MCP_URL = env.EVAL_GATEWAY_MCP_URL || 'https://localhost:8000/mcp';
 export const EVAL_LOG_DIR = resolve(PROJECT_ROOT, 'var/eval');
-export const RESULTS_DIR = resolve(PROJECT_ROOT, 'var/eval/results');
+export const RESULTS_DIR = process.env.EVAL_RESULTS_DIR ?? resolve(PROJECT_ROOT, 'var/eval/results');
 export const MCP_CACHE_DIR = resolve(PROJECT_ROOT, 'var/cache/dev/mcp');
 
 // Prepended to the task prompt. condition-a.md is SYSTEM_PROMPT.md as the March 2026 runs used it
