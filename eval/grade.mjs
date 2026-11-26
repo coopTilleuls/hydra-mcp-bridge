@@ -13,11 +13,17 @@ function mentions(text, keyword) {
   return new RegExp(`(?<![a-z0-9])${escaped}`).test(text);
 }
 
+// Models write typographic quotes ("can’t"), keywords use ASCII ones.
+function normalize(response) {
+  return (response || '').replace(/[\u2018\u2019\u02BC]/g, "'").replace(/[\u201C\u201D]/g, '"');
+}
+
 /**
  * @returns {{pass: boolean|null, detail: string}|null} null when the goal needs the live API state
  */
-export function gradeResponse(goal, response) {
-  const text = (response || '').toLowerCase();
+export function gradeResponse(goal, rawResponse) {
+  const response = normalize(rawResponse);
+  const text = response.toLowerCase();
 
   switch (goal.type) {
     case 'response_contains': {
@@ -36,12 +42,12 @@ export function gradeResponse(goal, response) {
     }
 
     case 'response_regex': {
-      const missing = goal.patterns.filter(p => !new RegExp(p, 'i').test(response || ''));
+      const missing = goal.patterns.filter(p => !new RegExp(p, 'i').test(response));
       return { pass: missing.length === 0, detail: missing.length === 0 ? 'all patterns matched' : `no match for: ${missing.join(' ; ')}` };
     }
 
     case 'all': {
-      const results = goal.goals.map(g => gradeResponse(g, response));
+      const results = goal.goals.map(g => gradeResponse(g, rawResponse));
       if (results.some(r => r === null)) return null;
       const failed = results.find(r => !r.pass);
       return failed ?? { pass: true, detail: 'all goals met' };

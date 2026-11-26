@@ -23,6 +23,11 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Finding: several goals passed wrong answers. "rating" matched any answer (T1.2). "Hyperion" plus "bookmark" passed false claims of success (T3.4: 2 of the 3 March Gemini "passes" made no bookmark call). A count-only check passed models that substituted another Open Library ID (T2.1, T4.2). T4.2 used `OL35227850M`, a deleted Open Library record that the demo could never create.
 - Kept: a shared grader (`eval/grade.mjs`) that checks API state and regex goals, and a live ID for T4.2. Commit e956005. Moving from the paper's figures to the regraded ones flips the A vs B ordering (A 91.2/86.0 → 86.0/82.5, B 87.4/83.2 → 89.5/86.3), with A still provisional.
 
+### Keyword grading, second pass (2026-11-26)
+- Finding (full A, gpt-6-luna, paused at 53/171): five correct refusals were graded as failures. Models write typographic apostrophes ("can’t") while the keywords use ASCII ones, and past-tense refusals ("I couldn’t change the author") were not in the T2.6 list.
+- Kept: quote normalization in `gradeResponse` and past-tense variants, with `eval/grade.test.mjs`. Open question: keyword lists for the negative-capability tasks keep chasing phrasings, so an LLM judge or manual review may be needed for those tasks.
+- Also found: the demo fetches Open Library live when a book is created, and two correct `post_book` calls failed on timeouts and connection resets. The run was paused so these lookups can be replayed from recorded responses.
+
 ## 2026-11 — Binding dynamic tools to sub-resources
 
 ### Problem
