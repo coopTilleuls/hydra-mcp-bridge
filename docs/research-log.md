@@ -32,6 +32,13 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Finding: OpenCode offers its built-in tools (bash, read, webfetch, grep, skill, …) alongside the MCP ones. In the A run, 24 of 163 runs used them: they curled the gateway and the demo directly, read local config files, and fetched Open Library to find IDs. A `cookies.txt` left by one run was visible to later ones. Clean runs passed 136/139, contaminated runs 9/24, and the contamination is concentrated on the negative-capability tasks (T2.5, T2.6, T4.4, T1.5) and T3.4. The built-in tool schemas also add tokens to every request, which skews the context-cost metrics. The March runs likely had them enabled too (to check).
 - Kept: `permission: {"*": "deny", "invalid": "allow", "book-api_*": "allow"}` in both conditions. Verified through a logging proxy: the request's `tools` array holds only MCP tools (A: `read_api_resource` then discovered tools; B: the 19 OpenAPI tools). The test dirs were cleaned, leaving only opencode.json and the init git repo.
 
+### Context cost against API size (2026-11-27)
+- Finding on the 19-operation demo: the interfaces tie on success (A/B: luna 57/54, gemini 51/50, deepseek 53/54 of 57) but A used 1.4× to 3× more input tokens, so the context claim cannot be made on a small API.
+- Hypothesis: B loads every operation up front, A only the visited collections, so A should stay flat as the API grows.
+- Protocol: `EVAL_EXTRA_RESOURCES=N` adds N in-memory resources (5 operations each, never touched by the tasks; N=0 is byte-identical). gpt-6-luna, tasks T1.1 T1.3 T2.1 T2.4 T4.1, k=3, A and B.
+- Result, input tokens per run (A / B): N=0 (19 ops) 4320 / 2848, N=10 (69 ops) 4103 / 7024, N=40 (219 ops) 4596 / 22339, N=100 (519 ops) 5117 / 43676. Success stayed 15/15 in both conditions at every N. The crossover lies between 19 and 69 operations; at 519 operations B uses 8.5× the context of A.
+- Behaviour per condition (full A/B): Gemini deleted and recreated Hyperion to work around a read-only field only in A; luna refused to invent an Open Library ID only in A (3/3) and invented one in B (3/3); Gemini reported the OpenAPI server's abbreviated tool name "usrs" as a collection in B (3/3).
+
 ## 2026-11 — Binding dynamic tools to sub-resources
 
 ### Problem
