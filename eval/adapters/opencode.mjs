@@ -1,6 +1,31 @@
 import { spawn } from 'node:child_process';
 
 const DEFAULT_MODEL = 'github-copilot/gpt-5.3-codex';
+const MCP_SERVER_PREFIX = 'book-api_';
+
+export function parseEvents(stdout) {
+  const events = [];
+  for (const line of String(stdout ?? '').trim().split('\n').filter(Boolean)) {
+    try { events.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
+  }
+  return events;
+}
+
+export function extractClientToolCalls(events) {
+  const calls = [];
+  for (const ev of events) {
+    if (ev.type !== 'tool_use' || !ev.part?.tool) continue;
+    const { tool, state = {} } = ev.part;
+    const call = {
+      tool: tool.startsWith(MCP_SERVER_PREFIX) ? tool.slice(MCP_SERVER_PREFIX.length) : tool,
+      input: state.input ?? {},
+      status: state.status ?? null,
+    };
+    if (state.status === 'error') call.error = state.error ?? null;
+    calls.push(call);
+  }
+  return calls;
+}
 
 /**
  * Run a single task prompt via OpenCode CLI in headless mode.
@@ -60,11 +85,7 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
       let usage = null;
 
       // Parse JSONL events
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      const events = [];
-      for (const line of lines) {
-        try { events.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
-      }
+      const events = parseEvents(stdout);
 
       // Extract session ID from first event
       for (const ev of events) {
@@ -113,6 +134,7 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
       resolve({
         response,
         sessionId,
+        clientToolCalls: extractClientToolCalls(events),
         usage,
         durationMs,
         exitCode: code ?? 1,

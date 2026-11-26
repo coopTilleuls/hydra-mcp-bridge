@@ -437,6 +437,7 @@ async function main() {
           isNegativeCapability: task.negativeCapability,
           goalResult,
           gatewayLog: ndjsonPath ? ndjsonPath.replace(PROJECT_ROOT + '/', '') : null,
+          clientToolCalls: cliResult.clientToolCalls,
           gatewayMetrics,
           stderr: cliResult.stderr || null,
         };

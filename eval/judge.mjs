@@ -31,14 +31,25 @@ function clip(value) {
   return text.length > ARG_LIMIT ? `${text.slice(0, ARG_LIMIT)}... [truncated]` : text;
 }
 
+function formatArgs(args) {
+  return Object.entries(args ?? {}).map(([k, v]) => `${k}=${clip(v)}`).join(', ');
+}
+
 function describeToolCalls(result) {
-  const calls = result.gatewayMetrics?.toolCalls;
-  if (!Array.isArray(calls) || calls.length === 0) {
+  const client = result.clientToolCalls;
+  const gateway = result.gatewayMetrics?.toolCalls;
+  let lines;
+  if (Array.isArray(client) && client.length > 0) {
+    lines = client.map((c, i) => {
+      const outcome = 'error' === c.status ? `FAILED${c.error ? `: ${clip(c.error)}` : ''}` : (c.status ?? 'unknown');
+      return `${i + 1}. ${c.tool}(${formatArgs(c.input)}) -> ${outcome}`;
+    });
+  } else if (Array.isArray(gateway) && gateway.length > 0) {
+    lines = gateway.map((c, i) => `${i + 1}. ${c.tool}(${formatArgs(c.args)})`);
+  } else {
     return 'No tool call information was recorded for this run (it may have made calls that are not logged). Judge from the final response only, and do not assume the agent made or did not make any call.';
   }
-  return calls
-    .map((c, i) => `${i + 1}. ${c.tool}(${Object.entries(c.args ?? {}).map(([k, v]) => `${k}=${clip(v)}`).join(', ')})`)
-    .join('\n');
+  return lines.join('\n');
 }
 
 export function buildPrompt(task, result) {
@@ -53,7 +64,7 @@ ${task.judge.rubric}
 ## Agent's final response
 ${result.response || '(empty)'}
 
-## Tool calls made by the agent, in order
+## Tool calls made by the agent, in order (a FAILED call did not take effect: a failed delete is not a delete)
 ${describeToolCalls(result)}
 
 ## Output
