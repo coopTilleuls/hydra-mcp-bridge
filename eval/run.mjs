@@ -14,17 +14,21 @@
  *   node eval/run.mjs --runs 5                 # k=5 repetitions
  *   node eval/run.mjs --timeout 180000         # 3min timeout per task
  *   node eval/run.mjs --condition B            # OpenAPI static condition
+ *   node eval/run.mjs --condition C            # Hydra gateway, static two-tool mode
+ *                                              # (gateway must run with HYDRA_LEGACY_DISCOVERY=static)
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { TASKS } from './tasks.mjs';
+import { evaluateGoal } from './grade.mjs';
 import {
-  PROJECT_ROOT, DEMO_API_DIR, EVAL_LOG_DIR, RESULTS_DIR,
+  PROJECT_ROOT, EVAL_LOG_DIR, RESULTS_DIR,
   MCP_CACHE_DIR, MODELS, GATEWAY_CLIENT_SLUG,
   TEST_HYDRA_DIR, TEST_OPENAPI_DIR, modelSlug,
+  DEMO_COMPOSE_ARGS, DEMO_BASE_URL, GATEWAY_MCP_URL, SYSTEM_PROMPTS,
 } from './config.mjs';
 import { runTask } from './adapters/opencode.mjs';
 
@@ -40,7 +44,7 @@ function parseArgs() {
     timeoutMs: 120_000,
     dryRun: false,
     skipReset: false,
-    condition: 'A', // A = Hydra gateway, B = OpenAPI static
+    condition: 'A', // A = Hydra gateway (dynamic tools), B = OpenAPI static, C = Hydra gateway (static tools)
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -60,8 +64,8 @@ function parseArgs() {
       case '--skip-reset': opts.skipReset = true; break;
       case '--condition': {
         const v = (val ?? args[++i])?.toUpperCase();
-        if (v !== 'A' && v !== 'B') {
-          console.error('--condition must be A (Hydra gateway) or B (OpenAPI static)');
+        if (v !== 'A' && v !== 'B' && v !== 'C') {
+          console.error('--condition must be A (Hydra gateway), B (OpenAPI static) or C (Hydra gateway, static tools)');
           process.exit(1);
         }
         opts.condition = v;
@@ -96,7 +100,7 @@ function resetFixtures() {
   console.log('  [fixtures] Resetting database...');
   try {
     execFileSync('docker', [
-      'compose', '-f', `${DEMO_API_DIR}/compose.yaml`,
+      'compose', ...DEMO_COMPOSE_ARGS,
       'exec',
       '-e', 'FIXTURES_SEED=42',
       '-e', 'FOUNDRY_FAKER_SEED=42',
@@ -199,140 +203,6 @@ function extractGatewayMetrics(ndjsonPath) {
   };
 }
 
-// ─── Goal evaluation ────────────────────────────────────────────────────────
-
-async function evaluateGoal(task, result) {
-  const { goal } = task;
-  const text = (result.response || '').toLowerCase();
-
-  switch (goal.type) {
-    case 'response_contains': {
-      const allFound = goal.values.every(v => text.includes(v.toLowerCase()));
-      return {
-        pass: allFound,
-        detail: allFound
-          ? 'all keywords found'
-          : `missing: ${goal.values.filter(v => !text.includes(v.toLowerCase())).join(', ')}`,
-      };
-    }
-
-    case 'response_contains_any': {
-      const anyFound = goal.values.some(v => text.includes(v.toLowerCase()));
-      return { pass: anyFound, detail: anyFound ? 'keyword found' : 'no keywords found' };
-    }
-
-    case 'response_indicates_limitation': {
-      const anyFound = goal.keywords.some(kw => text.includes(kw.toLowerCase()));
-      return {
-        pass: anyFound,
-        detail: anyFound ? 'limitation acknowledged' : 'no limitation reported',
-      };
-    }
-
-    case 'api_state': {
-      return verifyApiState(goal);
-    }
-
-    case 'api_state_chained': {
-      return verifyApiStateChained(goal);
-    }
-
-    case 'response_match': {
-      return { pass: null, detail: 'manual review required' };
-    }
-
-    default:
-      return { pass: null, detail: `unknown goal type: ${goal.type}` };
-  }
-}
-
-function verifyApiState(goal) {
-  try {
-    const raw = execFileSync('curl', [
-      '-sk', `https://localhost${goal.url}`,
-      '-H', 'Accept: application/ld+json',
-    ], { timeout: 10_000, encoding: 'utf-8' });
-
-    const data = JSON.parse(raw);
-
-    for (const [key, expected] of Object.entries(goal.expect)) {
-      if (key === 'hydra:totalItems') {
-        const actual = data['hydra:totalItems'];
-        if (actual !== expected) {
-          return { pass: false, detail: `hydra:totalItems: expected ${expected}, got ${actual}` };
-        }
-      } else if (key === 'hydra:totalItems_gte') {
-        const actual = data['hydra:totalItems'];
-        if (actual < expected) {
-          return { pass: false, detail: `hydra:totalItems: expected >= ${expected}, got ${actual}` };
-        }
-      } else if (key === 'member_condition_contains') {
-        const members = data['hydra:member'] || [];
-        const found = members.some(m =>
-          (m.condition || '').toLowerCase().includes(expected.toLowerCase())
-        );
-        if (!found) {
-          return { pass: false, detail: `no member has condition containing "${expected}"` };
-        }
-      } else if (key === 'all_members_condition_contains') {
-        const members = data['hydra:member'] || [];
-        if (members.length === 0) {
-          return { pass: false, detail: 'no members found' };
-        }
-        const allMatch = members.every(m =>
-          (m.condition || '').toLowerCase().includes(expected.toLowerCase())
-        );
-        if (!allMatch) {
-          return { pass: false, detail: `not all members have condition containing "${expected}"` };
-        }
-      } else if (key === 'member_body_contains') {
-        const members = data['hydra:member'] || [];
-        const found = members.some(m =>
-          (m.body || '').toLowerCase().includes(expected.toLowerCase())
-        );
-        if (!found) {
-          return { pass: false, detail: `no member has body containing "${expected}"` };
-        }
-      }
-    }
-
-    return { pass: true, detail: 'API state verified' };
-  } catch (err) {
-    return { pass: false, detail: `API check failed: ${err.message}` };
-  }
-}
-
-function verifyApiStateChained(goal) {
-  try {
-    let baseUrl = '';
-    for (const step of goal.steps) {
-      const url = step.url || (baseUrl + step.urlSuffix);
-      const raw = execFileSync('curl', [
-        '-sk', `https://localhost${url}`,
-        '-H', 'Accept: application/ld+json',
-      ], { timeout: 10_000, encoding: 'utf-8' });
-
-      const data = JSON.parse(raw);
-
-      if (step.extract === 'first_member_id') {
-        const members = data['hydra:member'] || [];
-        if (members.length === 0) {
-          return { pass: false, detail: `no members found at ${url}` };
-        }
-        baseUrl = members[0]['@id'];
-      }
-
-      if (step.expect) {
-        const result = verifyApiState({ url, expect: step.expect });
-        if (!result.pass) return result;
-      }
-    }
-    return { pass: true, detail: 'chained API state verified' };
-  } catch (err) {
-    return { pass: false, detail: `chained API check failed: ${err.message}` };
-  }
-}
-
 // ─── Result persistence ─────────────────────────────────────────────────────
 
 function saveResult(result, condSuffix) {
@@ -342,14 +212,96 @@ function saveResult(result, condSuffix) {
   writeFileSync(join(RESULTS_DIR, filename), JSON.stringify(result, null, 2));
 }
 
+// ─── Gateway mode preflight ─────────────────────────────────────────────────
+
+const MCP_PROTOCOL_VERSION = '2025-06-18';
+
+function parseMcpBody(body) {
+  const trimmed = body.trim();
+  if (trimmed.startsWith('{')) return JSON.parse(trimmed);
+  for (const line of trimmed.split(/\r?\n/)) {
+    if (line.startsWith('data:')) {
+      const payload = line.slice(5).trim();
+      if (payload.startsWith('{')) return JSON.parse(payload);
+    }
+  }
+  throw new Error(`unparseable MCP response: ${trimmed.slice(0, 200)}`);
+}
+
+function postMcp(payload, extraHeaders = []) {
+  const proc = spawnSync('curl', [
+    '-sk', '-i', '-X', 'POST', GATEWAY_MCP_URL,
+    '-H', 'Content-Type: application/json',
+    '-H', 'Accept: application/json, text/event-stream',
+    ...extraHeaders.flatMap(h => ['-H', h]),
+    '--data', JSON.stringify(payload),
+  ], { timeout: 15_000, encoding: 'utf-8' });
+
+  if (proc.error || proc.status !== 0 || !proc.stdout) {
+    throw new Error(proc.error?.message || `curl exited with ${proc.status}`);
+  }
+
+  const parts = proc.stdout.split(/\r?\n\r?\n/);
+  let idx = 0;
+  while (idx < parts.length - 1 && /^HTTP\/[\d.]+ 1\d\d/.test(parts[idx])) idx++;
+  const head = parts[idx];
+  const body = parts.slice(idx + 1).join('\n\n');
+  const sessionId = head.match(/^mcp-session-id:\s*(\S+)/im)?.[1] ?? null;
+  return { sessionId, message: parseMcpBody(body) };
+}
+
+function preflightGatewayMode(condition) {
+  const expectStatic = condition === 'C';
+  let toolNames;
+  try {
+    const init = postMcp({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'eval-preflight', version: '1.0' },
+      },
+    });
+    if (!init.sessionId) throw new Error('initialize response carried no Mcp-Session-Id header');
+
+    const list = postMcp(
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      [`Mcp-Session-Id: ${init.sessionId}`, `MCP-Protocol-Version: ${MCP_PROTOCOL_VERSION}`],
+    );
+    toolNames = (list.message?.result?.tools ?? []).map(t => t.name);
+  } catch (err) {
+    console.error(`Gateway preflight failed: cannot query ${GATEWAY_MCP_URL} (${err.message})`);
+    console.error('Start the gateway from the repo root with docker compose up -d.');
+    process.exit(1);
+  }
+
+  const isStatic = toolNames.includes('invoke_api_operation');
+  if (isStatic !== expectStatic) {
+    const running = isStatic ? 'static' : 'dynamic';
+    const wanted = expectStatic ? 'static' : 'dynamic';
+    console.error(`Gateway mode mismatch: condition ${condition} needs ${wanted} discovery but the running gateway is ${running} (tools: ${toolNames.join(', ') || 'none'}).`);
+    console.error(`Fix, from the repo root: HYDRA_LEGACY_DISCOVERY=${wanted} docker compose up -d`);
+    process.exit(1);
+  }
+  console.log(`Gateway mode OK: ${expectStatic ? 'static' : 'dynamic'} (tools: ${toolNames.join(', ')})\n`);
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
   const opts = parseArgs();
 
-  const isConditionA = opts.condition === 'A';
-  const conditionLabel = isConditionA ? 'A (Hydra gateway)' : 'B (OpenAPI static)';
-  const cwd = isConditionA ? TEST_HYDRA_DIR : TEST_OPENAPI_DIR;
+  const usesGateway = opts.condition !== 'B';
+  const conditionLabel = {
+    A: 'A (Hydra gateway)',
+    B: 'B (OpenAPI static)',
+    C: 'C (Hydra gateway, static tools)',
+  }[opts.condition];
+  const cwd = usesGateway ? TEST_HYDRA_DIR : TEST_OPENAPI_DIR;
+  const systemPromptFile = SYSTEM_PROMPTS[opts.condition] ?? null;
+  const systemPrompt = systemPromptFile ? readFileSync(systemPromptFile, 'utf-8') : '';
 
   // Filter tasks
   let tasks = TASKS;
@@ -380,6 +332,8 @@ async function main() {
     }
     return;
   }
+
+  if (usesGateway) preflightGatewayMode(opts.condition);
 
   mkdirSync(RESULTS_DIR, { recursive: true });
 
@@ -415,7 +369,7 @@ async function main() {
         console.log(`  Running opencode --model ${model}...`);
         let cliResult;
         try {
-          cliResult = await runTask(task.prompt, '', {
+          cliResult = await runTask(task.prompt, systemPrompt, {
             timeoutMs: opts.timeoutMs,
             cwd,
             model,
@@ -432,9 +386,9 @@ async function main() {
           console.log(`  stderr: ${cliResult.stderr.slice(0, 300)}`);
         }
 
-        // 4. Find gateway NDJSON log (Condition A only)
+        // 4. Find gateway NDJSON log (gateway conditions A and C)
         let ndjsonPath = null;
-        if (isConditionA) {
+        if (usesGateway) {
           ndjsonPath = findNdjsonLog(preRunTimestamp);
           if (ndjsonPath) {
             console.log(`  Gateway log: ${ndjsonPath.replace(PROJECT_ROOT + '/', '')}`);
@@ -445,12 +399,12 @@ async function main() {
 
         // 5. Extract gateway metrics
         const gatewayMetrics = extractGatewayMetrics(ndjsonPath);
-        if (isConditionA) {
+        if (usesGateway) {
           console.log(`  Tool calls: ${gatewayMetrics.toolCallCount}, Errors: ${gatewayMetrics.errorCount}, Tools discovered: [${gatewayMetrics.discoveredTools.join(', ')}]`);
         }
 
         // 6. Evaluate goal
-        const goalResult = await evaluateGoal(task, cliResult);
+        const goalResult = evaluateGoal(task.goal, cliResult.response);
         const passLabel = goalResult.pass === true ? 'PASS' : goalResult.pass === false ? 'FAIL' : 'MANUAL';
         console.log(`  Result: ${passLabel} — ${goalResult.detail}`);
 
@@ -473,6 +427,7 @@ async function main() {
           run,
           timestamp: new Date().toISOString(),
           prompt: task.prompt,
+          systemPromptFile: systemPromptFile && relative(PROJECT_ROOT, systemPromptFile),
           response: cliResult.response,
           sessionId: cliResult.sessionId,
           usage: cliResult.usage,

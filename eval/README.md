@@ -2,8 +2,9 @@
 
 Automates the evaluation protocol from `EVAL_PROTOCOL.md`. Runs 19 tasks against LLM CLI tools in headless mode, collects structured results and gateway NDJSON logs.
 
-Compares two conditions:
+Compares three conditions:
 - **Condition A (Hydra gateway)**: Lazy hypermedia-driven discovery. 1 tool at init, more appear as the agent navigates. MCP server is the gateway at `http://localhost:8000/mcp`.
+- **Condition C (Hydra gateway, static tools)**: The same gateway and the same project directory as A, started with `HYDRA_LEGACY_DISCOVERY=static`. `tools/list` is always exactly two tools, `read_api_resource` and `invoke_api_operation`. Read results carry the operations and their JSON schemas, and `invoke_api_operation(uri, method, payload)` runs them. Under A (`HYDRA_LEGACY_DISCOVERY=dynamic`, the default) `invoke_api_operation` is never listed.
 - **Condition B (OpenAPI static)**: All tools pre-registered from OpenAPI spec at init. MCP server is `@ivotoby/openapi-mcp-server` pointed at `https://localhost/docs.jsonopenapi`.
 
 No external dependencies — Node built-ins only (`child_process`, `fs`, `path`).
@@ -11,7 +12,7 @@ No external dependencies — Node built-ins only (`child_process`, `fs`, `path`)
 ## Prerequisites
 
 - Demo API running: `curl -sk https://localhost/books`
-- For Condition A: gateway running at `http://localhost:8000/mcp`
+- For Conditions A and C: gateway running at `http://localhost:8000/mcp` in the matching mode (see below)
 - For Condition B: `npx @ivotoby/openapi-mcp-server` available (installed on first run)
 - CLI tools installed: `claude`, `gemini`, `opencode`
 
@@ -22,12 +23,24 @@ Each condition has its own project directory with `.mcp.json` and per-CLI settin
 | Condition | Directory | MCP Server |
 |-----------|-----------|------------|
 | A (Hydra) | `/home/soyuka/projects/test-hydra-mcp` | HTTP transport → `http://localhost:8000/mcp` |
+| C (Hydra, static tools) | `/home/soyuka/projects/test-hydra-mcp` (same as A) | HTTP transport → `http://localhost:8000/mcp` |
 | B (OpenAPI) | `/home/soyuka/projects/test-openapi-mcp` | stdio → `@ivotoby/openapi-mcp-server` |
 
 All CLIs spawn with `cwd` set to the condition's directory so they pick up:
 - `.mcp.json` — MCP server config
 - `.claude/settings.local.json` — Claude tool permissions
 - `opencode.json` — OpenCode MCP config
+
+## Switching the gateway mode (A and C)
+
+A and C use the same project directory and the same gateway; only the gateway's `HYDRA_LEGACY_DISCOVERY` env var differs. It is passed through by `compose.yaml`. From the repo root:
+
+```bash
+HYDRA_LEGACY_DISCOVERY=dynamic docker compose up -d   # Condition A (default)
+HYDRA_LEGACY_DISCOVERY=static docker compose up -d    # Condition C
+```
+
+Before running tasks (skipped with `--dry-run`), `run.mjs` opens an MCP session on `https://localhost:8000/mcp` and checks `tools/list`: `invoke_api_operation` must be listed for C and absent for A. On a mismatch, or if the gateway is unreachable, it prints the fix and exits with code 1, so results are never mislabeled.
 
 ## Usage
 
@@ -36,6 +49,10 @@ All CLIs spawn with `cwd` set to the condition's directory so they pick up:
 node eval/run.mjs                                # All tasks, all CLIs, k=1
 node eval/run.mjs --cli claude --task T1.1       # Single task, single CLI
 node eval/run.mjs --tier 1 --runs 5              # Tier 1, k=5
+
+# Condition C (Hydra gateway, static tools — restart the gateway with HYDRA_LEGACY_DISCOVERY=static first)
+node eval/run.mjs --condition C                  # All tasks, all models
+node eval/run.mjs --condition C --task T1.1      # Single task
 
 # Condition B (OpenAPI static)
 node eval/run.mjs --condition B                  # All tasks, all CLIs
@@ -54,7 +71,7 @@ node eval/analyze.mjs                            # Full summary (table)
 node eval/analyze.mjs --format csv               # CSV output + files
 node eval/analyze.mjs --cli claude               # Filter by CLI
 node eval/analyze.mjs --tier 1                   # Filter by tier
-node eval/analyze.mjs --condition A              # Filter by condition
+node eval/analyze.mjs --condition A              # Filter by condition (A, B or C)
 ```
 
 ## File Structure
@@ -83,24 +100,25 @@ Output: `var/eval/results/{taskId}_{condition}_{cli}_{run}.json`
 
 ## System Prompts
 
-- **Condition A**: `SYSTEM_PROMPT.md` — "navigate first, never guess endpoints"
-- **Condition B**: Built-in prompt listing all available resources, required fields, and constraints. No navigation instructions since all tools are already available.
+- **Condition A**: `eval/prompts/condition-a.md` is prepended to the task prompt. It is `SYSTEM_PROMPT.md` as the March 2026 runs used it, kept verbatim (it still names the old `read_hydra_resource` tool). The gateway's MCP `instructions` add to it: a dynamic-mode `initialize` gets `app.mcp.dynamic_instructions` (`config/packages/mcp.yaml`, the March text).
+- **Condition B**: no system prompt, the OpenAPI tools are all listed up front.
+- **Condition C**: no system prompt yet. The gateway serves the static-mode `instructions` (`invoke_api_operation`).
 
 ## Execution Flow
 
 Per task x condition x cli x run:
 
 1. Reset DB fixtures via `docker compose exec` on demo API (`FIXTURES_SEED=42`)
-2. Clear gateway MCP session cache (`var/cache/dev/mcp/*`) — Condition A only
+2. Clear gateway MCP session cache (`var/cache/dev/mcp/*`)
 3. Record pre-run timestamp
 4. Spawn CLI subprocess with `cwd` set to the condition's project directory
 5. Parse CLI output via adapter -> normalized result
-6. Find matching gateway NDJSON log (Condition A only — Condition B uses stdio MCP)
+6. Find matching gateway NDJSON log (Conditions A and C — Condition B uses stdio MCP)
 7. Extract gateway metrics (tool calls, errors, tool list snapshots)
 8. Evaluate goal state (keyword matching, API state check, or manual flag)
 9. Write result to `var/eval/results/{taskId}_{condition}_{cli}_{run}.json`
 
-## Gateway Log Matching (Condition A only)
+## Gateway Log Matching (Conditions A and C)
 
 The `McpEvalLogger` writes NDJSON to `var/eval/{clientSlug}_{sessionId}.ndjson`. The runner matches logs by:
 
@@ -115,7 +133,7 @@ Condition B uses a stdio MCP server (`@ivotoby/openapi-mcp-server`) — no gatew
 | Metric | Source | Auto-evaluated |
 |--------|--------|----------------|
 | M1: Task Completion | Goal checks (keyword match, API state) | Yes (except `manual` tasks) |
-| M2: Tool Call Count | `gatewayMetrics.toolCallCount` (Cond A) / CLI output (Cond B) | Yes |
+| M2: Tool Call Count | `gatewayMetrics.toolCallCount` (Cond A, C) / CLI output (Cond B) | Yes |
 | M3: Error Rate | `gatewayMetrics.errorCount` | Yes |
 | M4: Tool Selection Precision | Requires LLM judge | Pending |
 | M5: Token / Context Cost | `usage` + `gatewayMetrics.toolListSnapshots` | Yes |

@@ -17,9 +17,10 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { TASKS } from './tasks.mjs';
+import { gradeResponse } from './grade.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const RESULTS_DIR = resolve(__dirname, '..', 'var/eval/results');
+const RESULTS_DIR = process.env.EVAL_RESULTS_DIR ?? resolve(__dirname, '..', 'var/eval/results');
 
 // Build task lookup by ID for re-evaluation
 const TASK_BY_ID = Object.fromEntries(TASKS.map(t => [t.id, t]));
@@ -46,44 +47,12 @@ function agentKey(r) {
   return r.modelSlug || r.cli;
 }
 
-// Re-evaluate response-based goals against current task definitions.
-// API state goals (api_state, api_state_chained) cannot be re-evaluated
-// offline — the DB state is gone — so we keep the baked result for those.
+// API state goals cannot be regraded offline, the DB is reset after each run, so their baked result stays.
 function reEvaluateGoal(result) {
   const task = TASK_BY_ID[result.taskId];
-  if (!task) return result.goalResult; // unknown task, keep original
+  if (!task) return result.goalResult;
 
-  const { goal } = task;
-  const text = (result.response || '').toLowerCase();
-
-  switch (goal.type) {
-    case 'response_contains': {
-      const allFound = goal.values.every(v => text.includes(v.toLowerCase()));
-      return {
-        pass: allFound,
-        detail: allFound
-          ? 'all keywords found'
-          : `missing: ${goal.values.filter(v => !text.includes(v.toLowerCase())).join(', ')}`,
-      };
-    }
-
-    case 'response_contains_any': {
-      const anyFound = goal.values.some(v => text.includes(v.toLowerCase()));
-      return { pass: anyFound, detail: anyFound ? 'keyword found' : 'no keywords found' };
-    }
-
-    case 'response_indicates_limitation': {
-      const anyFound = goal.keywords.some(kw => text.includes(kw.toLowerCase()));
-      return {
-        pass: anyFound,
-        detail: anyFound ? 'limitation acknowledged' : 'no limitation reported',
-      };
-    }
-
-    default:
-      // api_state, api_state_chained, response_match — keep baked result
-      return result.goalResult;
-  }
+  return gradeResponse(task.goal, result.response) ?? result.goalResult;
 }
 
 function loadResults(opts) {
@@ -256,6 +225,10 @@ function computeM5(results) {
 // OpenAPI (condition B): all 19 tools are injected into every turn.
 // Hydra   (condition A): starts with 1 tool, grows lazily as collections
 //                         are visited — only the tools the agent needs.
+// Hydra   (condition C): fixed two-tool list (read_api_resource,
+//                         invoke_api_operation). Operation schemas travel in
+//                         tool results instead, so they show up in input
+//                         tokens and not in the schema overhead column.
 //
 // This gap widens with API size: a 200-operation API would inject ~17,800
 // tool-schema tokens per turn under OpenAPI, while the Hydra gateway still
@@ -266,35 +239,43 @@ const OPENAPI_TOOL_COUNT = 19;
 const OPENAPI_SCHEMA_TOKENS = 1685; // ~6738 chars / 4
 const HYDRA_STATIC_SCHEMA_TOKENS = 51; // 1 tool, ~202 chars / 4
 const AVG_TOKENS_PER_HYDRA_TOOL = 80; // Hydra tools have simpler schemas
+// Estimated schema size of the two static tools (condition C); an estimate,
+// to be replaced by a measurement of the gateway's tools/list response.
+const HYDRA_STATIC_TOOLS_SCHEMA_TOKENS = 2 * AVG_TOKENS_PER_HYDRA_TOOL;
+
+const usesGateway = r => (r.condition || 'A') !== 'B';
 
 function computeM6(results) {
   const rows = [];
   for (const r of results) {
     if (!r.usage) continue; // skip runs with no usage data
 
-    const isA = (r.condition || 'A') === 'A';
+    const isGateway = usesGateway(r);
+    const isStatic = r.condition === 'C';
     const eff = effectiveTokens(r.usage);
     if (eff.input === 0) continue;
 
     let schemaTokensPerTurn;
     let maxToolCount;
 
-    if (isA) {
+    if (isGateway) {
       const snapshots = r.gatewayMetrics?.toolListSnapshots || [1];
       maxToolCount = Math.max(1, ...snapshots);
       // Average tools across snapshots ≈ turns
       const avgToolCount = snapshots.length > 0
         ? snapshots.reduce((s, v) => s + v, 0) / snapshots.length
         : 1;
-      schemaTokensPerTurn = Math.ceil(avgToolCount * AVG_TOKENS_PER_HYDRA_TOOL);
+      schemaTokensPerTurn = isStatic
+        ? HYDRA_STATIC_TOOLS_SCHEMA_TOKENS
+        : Math.ceil(avgToolCount * AVG_TOKENS_PER_HYDRA_TOOL);
     } else {
       maxToolCount = OPENAPI_TOOL_COUNT;
       schemaTokensPerTurn = OPENAPI_SCHEMA_TOKENS;
     }
 
-    // Estimate turn count from gateway calls (A) or input growth (B)
+    // Estimate turn count from gateway calls (A, C) or input growth (B)
     let turns;
-    if (isA) {
+    if (isGateway) {
       turns = Math.max(1, (r.gatewayMetrics?.toolCallCount || 0) + 1);
     } else {
       // Each turn re-sends schemas + growing conversation

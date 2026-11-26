@@ -19,10 +19,10 @@ export const TASKS = [
     prompt: "What is the rating of 'Hyperion' in the book API?",
     negativeCapability: false,
     goal: {
-      type: 'response_contains_any',
-      // Rating is computed from reviews — the fixture has 31 reviews on Hyperion.
-      // The agent just needs to return a numeric rating value.
-      values: ['rating'],
+      // Hyperion's rating field is 2 with FIXTURES_SEED=42 (2.6 averaged over its 31 reviews).
+      // The previous check, the word "rating", passed any answer.
+      type: 'response_regex',
+      patterns: [String.raw`rat(ing|ed)\D{0,80}\b2\b|\b2(\.\d+)?\s*(/\s*5|stars?|out of)`],
     },
   },
   {
@@ -90,10 +90,11 @@ export const TASKS = [
       "Add a book to the book API with Open Library ID OL1168083M and set its condition to 'new'.",
     negativeCapability: false,
     goal: {
+      // Checks the requested edition, not the book count, so substituting another ID fails.
       type: 'api_state',
       method: 'GET',
-      url: '/books',
-      expect: { 'hydra:totalItems_gte': 77 },
+      url: '/books?title=Conflict%20of%20interest',
+      expect: { member_matches: { book: 'OL1168083M', condition: 'NewCondition' } },
     },
   },
   {
@@ -132,7 +133,7 @@ export const TASKS = [
       type: 'api_state_chained',
       steps: [
         { method: 'GET', url: '/books?title=Hyperion', extract: 'first_member_id' },
-        { method: 'GET', urlSuffix: '/reviews', expect: { member_body_contains: 'masterpiece' } },
+        { method: 'GET', urlSuffix: '/reviews', expect: { member_matches: { body: 'masterpiece', rating: 5 } } },
       ],
     },
   },
@@ -142,6 +143,8 @@ export const TASKS = [
     prompt: "Add a book called 'Brave New World' by Aldous Huxley to the book API.",
     negativeCapability: true,
     goal: {
+      // The prompt gives no Open Library ID, which a book requires. Picking one on the user's behalf
+      // and creating the book fails the task. "ID", "OL" and "need" were dropped: any answer had them.
       type: 'response_indicates_limitation',
       keywords: [
         'required',
@@ -150,10 +153,7 @@ export const TASKS = [
         'missing',
         'mandatory',
         'cannot create',
-        'need',
-        'OL',
         'identifier',
-        'ID',
       ],
     },
   },
@@ -214,9 +214,12 @@ export const TASKS = [
       "Check if the book API has any books by Philip Francis Nowlan. If not, add one with Open Library ID OL37044569M.",
     negativeCapability: false,
     goal: {
-      // "The Airlords of Han" already exists — agent should NOT add a duplicate
-      type: 'response_contains',
-      values: ['Nowlan'],
+      // "The Airlords of Han" already exists: the agent must report it and not add a duplicate.
+      type: 'all',
+      goals: [
+        { type: 'response_contains', values: ['Nowlan'] },
+        { type: 'api_state', method: 'GET', url: '/books?author=Nowlan', expect: { 'hydra:totalItems': 1 } },
+      ],
     },
   },
   {
@@ -226,8 +229,9 @@ export const TASKS = [
       "Using the book API, find 'Hyperion', read its reviews, and tell me the highest-rated one.",
     negativeCapability: false,
     goal: {
-      type: 'response_contains',
-      values: ['5'],
+      // Five of Hyperion's reviews are rated 5; the previous check passed any "5" in the answer.
+      type: 'response_regex',
+      patterns: [String.raw`rat(ing|ed)\D{0,80}\b5\b|\b5(\.0)?\s*(/\s*5|stars?|out of)`],
     },
   },
   {
@@ -236,10 +240,14 @@ export const TASKS = [
     prompt: "Using the book API, bookmark 'Hyperion'.",
     negativeCapability: false,
     goal: {
-      // /bookmarks returns 403 in current fixture — agent should find Hyperion
-      // and attempt the bookmark (success or report the auth error).
-      type: 'response_contains',
-      values: ['Hyperion', 'bookmark'],
+      // Hyperion is already bookmarked in the fixtures, and an anonymous POST /bookmarks fails
+      // (HTTP 500, user_id is null). A correct answer reports one or the other; claiming a new
+      // bookmark is wrong. The previous check only looked for "Hyperion" and "bookmark".
+      type: 'response_regex',
+      patterns: [
+        'hyperion',
+        String.raw`already\s+(been\s+)?bookmarked|already\s+(has|have)\s+a\s+bookmark|bookmark\w*\s+already\s+exists?|existing\s+bookmark|\b(500|error|failed|unable|could\s?n.?t|cannot|can.?t)\b`,
+      ],
     },
   },
 
@@ -258,13 +266,16 @@ export const TASKS = [
     id: 'T4.2',
     tier: 4,
     prompt:
-      "Using the book API, add a book (Open Library ID OL35227850M, condition 'new') and then write a review for it: 'Fascinating read', rating 4.",
+      "Using the book API, add a book (Open Library ID OL27970697M, condition 'new') and then write a review for it: 'Fascinating read', rating 4.",
     negativeCapability: false,
     goal: {
-      type: 'api_state',
-      method: 'GET',
-      url: '/books',
-      expect: { 'hydra:totalItems_gte': 77 },
+      // OL35227850M, used until 2026-11, is a deleted Open Library record: the demo could not create it,
+      // and the count-only check passed models that substituted another ID.
+      type: 'api_state_chained',
+      steps: [
+        { method: 'GET', url: '/books?title=Foundation', extract: 'first_member_id', expect: { member_matches: { book: 'OL27970697M', condition: 'NewCondition' } } },
+        { method: 'GET', urlSuffix: '/reviews', expect: { member_matches: { body: 'Fascinating read', rating: 4 } } },
+      ],
     },
   },
   {
@@ -274,8 +285,9 @@ export const TASKS = [
       "Using the book API, search for books by 'Gordon R. Dickson', then look at the reviews for each one. Summarize what you found.",
     negativeCapability: false,
     goal: {
+      // The author name is in the prompt; the summary must name a book and cover reviews.
       type: 'response_contains',
-      values: ['Gordon R. Dickson'],
+      values: ['Gordon R. Dickson', 'Dorsai', 'review'],
     },
   },
   {
