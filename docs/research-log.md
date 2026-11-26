@@ -28,6 +28,10 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Kept: quote normalization in `gradeResponse` and past-tense variants, with `eval/grade.test.mjs`. Open question: keyword lists for the negative-capability tasks keep chasing phrasings, so an LLM judge or manual review may be needed for those tasks.
 - Also found: the demo fetches Open Library live when a book is created, and two correct `post_book` calls failed on timeouts and connection resets. The run was paused so these lookups can be replayed from recorded responses.
 
+### OpenCode built-in tools bypassed the interface (2026-11-26)
+- Finding: OpenCode offers its built-in tools (bash, read, webfetch, grep, skill, …) alongside the MCP ones. In the A run, 24 of 163 runs used them: they curled the gateway and the demo directly, read local config files, and fetched Open Library to find IDs. A `cookies.txt` left by one run was visible to later ones. Clean runs passed 136/139, contaminated runs 9/24, and the contamination is concentrated on the negative-capability tasks (T2.5, T2.6, T4.4, T1.5) and T3.4. The built-in tool schemas also add tokens to every request, which skews the context-cost metrics. The March runs likely had them enabled too (to check).
+- Kept: `permission: {"*": "deny", "invalid": "allow", "book-api_*": "allow"}` in both conditions. Verified through a logging proxy: the request's `tools` array holds only MCP tools (A: `read_api_resource` then discovered tools; B: the 19 OpenAPI tools). The test dirs were cleaned, leaving only opencode.json and the init git repo.
+
 ## 2026-11 — Binding dynamic tools to sub-resources
 
 ### Problem

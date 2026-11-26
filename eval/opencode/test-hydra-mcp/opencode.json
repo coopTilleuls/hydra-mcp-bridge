@@ -64,6 +64,11 @@
       }
     }
   },
+  "permission": {
+    "*": "deny",
+    "invalid": "allow",
+    "book-api_*": "allow"
+  },
   "mcp": {
     "book-api": {
       "type": "remote",
