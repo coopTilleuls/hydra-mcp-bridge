@@ -344,6 +344,25 @@ class McpEndpointTest extends WebTestCase
         $this->assertSame('/orders/1', $operations['POST']['uri']);
     }
 
+    public function testReadingAnotherOriginIsRejectedWithoutAnyRequest(): void
+    {
+        $this->browser->disableReboot();
+        $requests = [];
+        static::getContainer()->set('hydra.client.uri_template', new MockHttpClient(static function (string $method, string $url) use (&$requests): MockResponse {
+            $requests[] = $url;
+
+            return new MockResponse('{}');
+        }, 'https://localhost'));
+
+        $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);
+        $this->assertSame(['https://localhost/books'], $requests, 'The guarded client wraps the upstream client.');
+
+        $response = $this->statelessRpc(2, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => 'http://169.254.169.254/latest/meta-data']]);
+
+        $this->assertTrue($response['result']['isError'] ?? isset($response['error']), json_encode($response));
+        $this->assertSame(['https://localhost/books'], $requests);
+    }
+
     public function testStatelessInvocationRejectsInvalidPayloadWithoutUpstreamCall(): void
     {
         $before = $this->statelessRpc(1, 'tools/call', ['name' => 'read_api_resource', 'arguments' => ['uri' => '/books']]);

@@ -31,6 +31,12 @@ services:
 
     Mcp\Capability\RegistryInterface: '@mcp.server.default.registry'
 
+    App\Http\SameOriginHttpClient:
+        decorates: 'hydra.client'
+        arguments:
+            $client: '@.inner'
+            $baseUri: '%env(HYDRA_API_BASE_URL)%'
+
     App\JsonLd\HttpClientDocumentLoader:
         arguments:
             $httpClient: '@hydra.client'

@@ -85,6 +85,7 @@ After registering new tools, `Fiber::suspend()` sends a `ToolListChangedNotifica
 - `RestoringRegistryDecorator` is excluded from auto-registration in `services.yaml` and manually wired as a decorator of `mcp.registry` with `decoration_priority: 10`
 - The MCP registry is shared by every request a FrankenPHP worker serves. `DynamicToolRegistry`, `RestoringRegistryDecorator` and `AffordanceStore` implement `ResetInterface`: dynamic tools are unregistered and caches cleared between requests, then restored from the current session only. Without it a new session inherits tools (with stale URIs) discovered by others. Covered by `testDynamicToolsDoNotLeakAcrossSessionsInWorkerMode` (`disableReboot()` mimics the worker).
 - `hydra.client` is a scoped Symfony HTTP client configured in `config/packages/framework.yaml` with `base_uri` from `HYDRA_API_BASE_URL`
+- `hydra.client` is decorated by `App\Http\SameOriginHttpClient`, which throws a `TransportException` before any request when the URL resolves to another scheme, host or port than `HYDRA_API_BASE_URL` (ScopingHttpClient lets absolute URLs through). Every consumer gets it; tests replacing `hydra.client` in the container bypass it, so mock `hydra.client.uri_template` (the decorated service) to keep the guard.
 - MCP config in `config/packages/mcp.yaml`: HTTP+stdio transports, file-based sessions in `%kernel.cache_dir%/mcp`
 
 ## Stack
