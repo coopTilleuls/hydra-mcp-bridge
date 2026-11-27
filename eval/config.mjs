@@ -19,10 +19,13 @@ export const MCP_CACHE_DIR = resolve(PROJECT_ROOT, 'var/cache/dev/mcp');
 // (removed from run.mjs in 98eda22, after those runs), kept verbatim, old tool name included.
 export const SYSTEM_PROMPTS = {
   A: resolve(PROJECT_ROOT, 'eval/prompts/condition-a.md'),
+  G: resolve(PROJECT_ROOT, 'eval/prompts/condition-g.md'),
 };
 
 // Condition A: Hydra gateway (lazy discovery, 1 tool at init)
 export const TEST_HYDRA_DIR = env.EVAL_TEST_HYDRA_DIR || '/home/soyuka/projects/test-hydra-mcp';
+// Condition G: Hydra gateway serving MCP groups, OpenCode fork with experimental.mcp_groups (the client must run the fork)
+export const TEST_HYDRA_GROUPS_DIR = env.EVAL_TEST_HYDRA_GROUPS_DIR || '/home/soyuka/projects/test-hydra-groups-mcp';
 // Condition B: OpenAPI static MCP (all tools pre-registered at init)
 export const TEST_OPENAPI_DIR = env.EVAL_TEST_OPENAPI_DIR || '/home/soyuka/projects/test-openapi-mcp';
 

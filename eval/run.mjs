@@ -15,6 +15,7 @@
  *   node eval/run.mjs --timeout 180000         # 3min timeout per task
  *   node eval/run.mjs --condition B            # OpenAPI static condition
  *   node eval/run.mjs --condition C            # Hydra gateway, static two-tool mode
+ *   node eval/run.mjs --condition G            # Hydra gateway, MCP groups (OpenCode fork)
  *                                              # (gateway must run with HYDRA_LEGACY_DISCOVERY=static)
  */
 
@@ -28,7 +29,7 @@ import { Guard } from './guard.mjs';
 import {
   PROJECT_ROOT, EVAL_LOG_DIR, RESULTS_DIR,
   MCP_CACHE_DIR, MODELS, GATEWAY_CLIENT_SLUG,
-  TEST_HYDRA_DIR, TEST_OPENAPI_DIR, modelSlug,
+  TEST_HYDRA_DIR, TEST_HYDRA_GROUPS_DIR, TEST_OPENAPI_DIR, modelSlug,
   DEMO_COMPOSE_ARGS, DEMO_BASE_URL, GATEWAY_MCP_URL, SYSTEM_PROMPTS,
 } from './config.mjs';
 import { runTask } from './adapters/opencode.mjs';
@@ -46,7 +47,7 @@ function parseArgs() {
     dryRun: false,
     skipReset: false,
     skipExisting: false,
-    condition: 'A', // A = Hydra gateway (dynamic tools), B = OpenAPI static, C = Hydra gateway (static tools)
+    condition: 'A', // A = Hydra gateway (dynamic tools), B = OpenAPI static, C = Hydra gateway (static tools), G = Hydra gateway (groups)
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -67,8 +68,8 @@ function parseArgs() {
       case '--skip-existing': opts.skipExisting = true; break;
       case '--condition': {
         const v = (val ?? args[++i])?.toUpperCase();
-        if (v !== 'A' && v !== 'B' && v !== 'C') {
-          console.error('--condition must be A (Hydra gateway), B (OpenAPI static) or C (Hydra gateway, static tools)');
+        if (!['A', 'B', 'C', 'G'].includes(v)) {
+          console.error('--condition must be A (Hydra gateway), B (OpenAPI static), C (Hydra gateway, static tools) or G (Hydra gateway, groups)');
           process.exit(1);
         }
         opts.condition = v;
@@ -218,6 +219,7 @@ function saveResult(result, condSuffix) {
 // ─── Gateway mode preflight ─────────────────────────────────────────────────
 
 const MCP_PROTOCOL_VERSION = '2025-06-18';
+const GROUPS_EXTENSION = 'io.modelcontextprotocol/groups';
 
 function parseMcpBody(body) {
   const trimmed = body.trim();
@@ -255,6 +257,7 @@ function postMcp(payload, extraHeaders = []) {
 
 function preflightGatewayMode(condition) {
   const expectStatic = condition === 'C';
+  const groups = condition === 'G';
   let toolNames;
   try {
     const init = postMcp({
@@ -263,11 +266,14 @@ function preflightGatewayMode(condition) {
       method: 'initialize',
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
+        capabilities: groups ? { extensions: { [GROUPS_EXTENSION]: {} } } : {},
         clientInfo: { name: 'eval-preflight', version: '1.0' },
       },
     });
     if (!init.sessionId) throw new Error('initialize response carried no Mcp-Session-Id header');
+    if (groups && !init.message?.result?.capabilities?.extensions?.[GROUPS_EXTENSION]) {
+      throw new Error(`the gateway does not advertise ${GROUPS_EXTENSION}`);
+    }
 
     const list = postMcp(
       { jsonrpc: '2.0', id: 2, method: 'tools/list' },
@@ -278,6 +284,15 @@ function preflightGatewayMode(condition) {
     console.error(`Gateway preflight failed: cannot query ${GATEWAY_MCP_URL} (${err.message})`);
     console.error('Start the gateway from the repo root with docker compose up -d.');
     process.exit(1);
+  }
+
+  if (groups) {
+    if (toolNames.join() !== 'read_api_resource') {
+      console.error(`Gateway mode mismatch: condition G needs read_api_resource alone in tools/list (tools: ${toolNames.join(', ') || 'none'}).`);
+      process.exit(1);
+    }
+    console.log('Gateway mode OK: groups (tools: read_api_resource)\n');
+    return;
   }
 
   const isStatic = toolNames.includes('invoke_api_operation');
@@ -301,8 +316,9 @@ async function main() {
     A: 'A (Hydra gateway)',
     B: 'B (OpenAPI static)',
     C: 'C (Hydra gateway, static tools)',
+    G: 'G (Hydra gateway, groups)',
   }[opts.condition];
-  const cwd = usesGateway ? TEST_HYDRA_DIR : TEST_OPENAPI_DIR;
+  const cwd = { A: TEST_HYDRA_DIR, B: TEST_OPENAPI_DIR, C: TEST_HYDRA_DIR, G: TEST_HYDRA_GROUPS_DIR }[opts.condition];
   const systemPromptFile = SYSTEM_PROMPTS[opts.condition] ?? null;
   const systemPrompt = systemPromptFile ? readFileSync(systemPromptFile, 'utf-8') : '';
 
