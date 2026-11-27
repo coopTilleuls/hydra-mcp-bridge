@@ -48,5 +48,6 @@ test('counts cache writes in the prompt tokens of each step', () => {
     cacheReadTokens: 1462,
     cacheCreationTokens: 1545,
     promptTokens: 3013,
+    stepPromptTokens: [1465, 1548],
   });
 });

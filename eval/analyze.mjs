@@ -12,13 +12,15 @@
  *   node eval/analyze.mjs --tier 1           # Filter by tier
  *   node eval/analyze.mjs --scaling var/eval/results,var/eval/scaling --tasks T1.1,T1.3,T2.1,T2.4,T4.1
  *                                            # Prompt tokens per API size (paths: result dirs or roots of them)
+ *   node eval/analyze.mjs --overhead var/eval/overhead
+ *                                            # First-step prompt of the probe task per API size (M6)
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { TASKS } from './tasks.mjs';
+import { TASKS, PROBE } from './tasks.mjs';
 import { gradeResponse } from './grade.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,7 +31,7 @@ const TASK_BY_ID = Object.fromEntries(TASKS.map(t => [t.id, t]));
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { format: 'table', model: null, tier: null, condition: null, scaling: null, tasks: null };
+  const opts = { format: 'table', model: null, tier: null, condition: null, scaling: null, overhead: null, tasks: null };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--format': opts.format = args[++i]; break;
@@ -39,6 +41,7 @@ function parseArgs() {
       case '--tier': opts.tier = parseInt(args[++i], 10); break;
       case '--condition': opts.condition = args[++i]?.toUpperCase(); break;
       case '--scaling': opts.scaling = args[++i]; break;
+      case '--overhead': opts.overhead = args[++i]; break;
       case '--tasks': opts.tasks = args[++i]?.split(','); break;
     }
   }
@@ -60,7 +63,9 @@ function reEvaluateGoal(result) {
 }
 
 function loadResults(opts) {
-  let results = (opts.scaling ? resultDirs(opts.scaling) : [RESULTS_DIR]).flatMap(loadDir);
+  const paths = opts.overhead ?? opts.scaling;
+  let results = (paths ? resultDirs(paths) : [RESULTS_DIR]).flatMap(loadDir);
+  if (!opts.overhead) results = withoutProbes(results);
   if (opts.tasks) results = results.filter(r => opts.tasks.includes(r.taskId));
 
   if (opts.model) results = results.filter(r => agentKey(r) === opts.model);
@@ -258,85 +263,15 @@ function computeM5(results) {
 
 // ─── M6: Tool Schema Overhead ──────────────────────────────────────────────
 //
-// Estimates how many tokens of each turn's context are spent on tool schemas.
-//
-// OpenAPI (condition B): all 19 tools are injected into every turn.
-// Hydra   (condition A): starts with 1 tool, grows lazily as collections
-//                         are visited — only the tools the agent needs.
-// Hydra   (condition C): fixed two-tool list (read_api_resource,
-//                         invoke_api_operation). Operation schemas travel in
-//                         tool results instead, so they show up in input
-//                         tokens and not in the schema overhead column.
-//
-// This gap widens with API size: a 200-operation API would inject ~17,800
-// tool-schema tokens per turn under OpenAPI, while the Hydra gateway still
-// starts at ~51.
+// Measured, not estimated: the probe task (eval/tasks.mjs PROBE) asks for a reply without tools, so its first step's
+// prompt is the system prompt, the tool definitions and the user message, counted by the model's own tokenizer.
 
-// Measured from the actual OpenAPI MCP server tools/list response
-const OPENAPI_TOOL_COUNT = 19;
-const OPENAPI_SCHEMA_TOKENS = 1685; // ~6738 chars / 4
-const HYDRA_STATIC_SCHEMA_TOKENS = 51; // 1 tool, ~202 chars / 4
-const AVG_TOKENS_PER_HYDRA_TOOL = 80; // Hydra tools have simpler schemas
-// Estimated schema size of the two static tools (condition C); an estimate,
-// to be replaced by a measurement of the gateway's tools/list response.
-const HYDRA_STATIC_TOOLS_SCHEMA_TOKENS = 2 * AVG_TOKENS_PER_HYDRA_TOOL;
+export const withoutProbes = results => results.filter(r => r.taskId !== PROBE.id);
 
-const usesGateway = r => (r.condition || 'A') !== 'B';
+export function computeOverhead(results) {
+  const probes = results.filter(r => r.taskId === PROBE.id && r.usage?.stepPromptTokens?.length);
 
-function computeM6(results) {
-  const rows = [];
-  for (const r of results) {
-    if (!r.usage) continue; // skip runs with no usage data
-
-    const isGateway = usesGateway(r);
-    const isStatic = r.condition === 'C';
-    const eff = effectiveTokens(r.usage);
-    if (eff.input === 0) continue;
-
-    let schemaTokensPerTurn;
-    let maxToolCount;
-
-    if (isGateway) {
-      const snapshots = r.gatewayMetrics?.toolListSnapshots || [1];
-      maxToolCount = Math.max(1, ...snapshots);
-      // Average tools across snapshots ≈ turns
-      const avgToolCount = snapshots.length > 0
-        ? snapshots.reduce((s, v) => s + v, 0) / snapshots.length
-        : 1;
-      schemaTokensPerTurn = isStatic
-        ? HYDRA_STATIC_TOOLS_SCHEMA_TOKENS
-        : Math.ceil(avgToolCount * AVG_TOKENS_PER_HYDRA_TOOL);
-    } else {
-      maxToolCount = OPENAPI_TOOL_COUNT;
-      schemaTokensPerTurn = OPENAPI_SCHEMA_TOKENS;
-    }
-
-    // Estimate turn count from gateway calls (A, C) or input growth (B)
-    let turns;
-    if (isGateway) {
-      turns = Math.max(1, (r.gatewayMetrics?.toolCallCount || 0) + 1);
-    } else {
-      // Each turn re-sends schemas + growing conversation
-      turns = Math.max(1, Math.round(eff.input / (schemaTokensPerTurn + 500)));
-    }
-
-    const cumulativeSchemaOverhead = schemaTokensPerTurn * turns;
-    const schemaPctOfInput = ((cumulativeSchemaOverhead / eff.input) * 100).toFixed(1);
-
-    rows.push({
-      taskId: r.taskId,
-      condition: r.condition || 'A',
-      agent: agentKey(r),
-      maxTools: maxToolCount,
-      schemaPerTurn: schemaTokensPerTurn,
-      estTurns: turns,
-      schemaOverhead: cumulativeSchemaOverhead,
-      inputTokens: eff.input,
-      schemaPct: schemaPctOfInput + '%',
-    });
-  }
-
-  return rows;
+  return computeScaling(probes, runs => Math.round(mean(runs.map(r => r.usage.stepPromptTokens[0]))), false);
 }
 
 // ─── M7: Conditions compared (per model) ──────────────────────────────────
@@ -381,7 +316,7 @@ export function computeComparison(results) {
 const BASE_OPERATIONS = 19;
 const OPERATIONS_PER_EXTRA_RESOURCE = 5;
 
-export function computeScaling(results) {
+export function computeScaling(results, value = meanPrompt, withPass = true) {
   const rows = {};
   const runs = {};
   for (const r of results) {
@@ -394,10 +329,10 @@ export function computeScaling(results) {
 
   // Every row gets every condition, in a fixed order, so table columns line up whatever the file order.
   const conditions = [...new Set(Object.values(runs).map(g => g.condition))].sort();
-  for (const row of Object.values(rows)) for (const c of conditions) Object.assign(row, { [c]: '', [`${c}_pass`]: '' });
+  for (const row of Object.values(rows)) for (const c of conditions) Object.assign(row, { [c]: '', ...(withPass && { [`${c}_pass`]: '' }) });
   for (const { row, condition, runs: group } of Object.values(runs)) {
-    row[condition] = meanPrompt(group);
-    row[`${condition}_pass`] = passCount(group);
+    row[condition] = value(group);
+    if (withPass) row[`${condition}_pass`] = passCount(group);
   }
 
   return Object.values(rows).sort((x, y) => x.agent.localeCompare(y.agent) || x.extraResources - y.extraResources);
@@ -467,6 +402,13 @@ function main() {
 
   console.log(`Loaded ${results.length} result(s)`);
 
+  if (opts.overhead) {
+    const overhead = computeOverhead(results);
+    if (opts.format === 'csv') console.log(toCsv(overhead));
+    else printTable('M6: First-step prompt tokens (system prompt + tool definitions + user message), by API size', overhead);
+    return;
+  }
+
   if (opts.scaling) {
     const scaling = computeScaling(results);
     if (opts.format === 'csv') console.log(toCsv(scaling));
@@ -478,7 +420,6 @@ function main() {
   const m2 = computeM2(results);
   const m3 = computeM3(results);
   const m5 = computeM5(results);
-  const m6 = computeM6(results);
   const comparison = computeComparison(results);
   const tiers = tierSummary(m1);
 
@@ -491,8 +432,6 @@ function main() {
     console.log(toCsv(m3));
     console.log('\n--- M5: Token/Context Cost (includes cache tokens) ---');
     console.log(toCsv(m5));
-    console.log('\n--- M6: Tool Schema Overhead ---');
-    console.log(toCsv(m6));
     console.log('\n--- M7: Conditions compared ---');
     console.log(toCsv(comparison));
     console.log('\n--- Tier Summary ---');
@@ -504,7 +443,6 @@ function main() {
     writeFileSync(join(RESULTS_DIR, 'summary_m2.csv'), toCsv(m2));
     writeFileSync(join(RESULTS_DIR, 'summary_m3.csv'), toCsv(m3));
     writeFileSync(join(RESULTS_DIR, 'summary_m5.csv'), toCsv(m5));
-    writeFileSync(join(RESULTS_DIR, 'summary_m6.csv'), toCsv(m6));
     writeFileSync(join(RESULTS_DIR, 'summary_comparison.csv'), toCsv(comparison));
     writeFileSync(join(RESULTS_DIR, 'summary_tiers.csv'), toCsv(tiers));
     console.log(`\nCSV files written to ${RESULTS_DIR}/summary_*.csv`);
@@ -513,7 +451,6 @@ function main() {
     printTable('M2: Tool Call Count (per task × cli)', m2);
     printTable('M3: Error Rate (aggregate per CLI)', m3);
     printTable('M5: Token / Context Cost (includes cache tokens)', m5);
-    printTable('M6: Tool Schema Overhead', m6);
     printTable('M7: Conditions compared (mean prompt tokens per run, vs B)', comparison);
     printTable('Tier Summary', tiers);
 
@@ -525,7 +462,7 @@ function main() {
   }
 
   // Write JSON summary
-  const summary = { m1, m2, m3, m5, m6, comparison, tiers, resultCount: results.length };
+  const summary = { m1, m2, m3, m5, comparison, tiers, resultCount: results.length };
   mkdirSync(RESULTS_DIR, { recursive: true });
   writeFileSync(join(RESULTS_DIR, 'summary.json'), JSON.stringify(summary, null, 2));
   console.log(`\nJSON summary: ${RESULTS_DIR}/summary.json`);

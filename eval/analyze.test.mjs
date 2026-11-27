@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { promptTokens, computeM2, computeM3, computeComparison, computeScaling, resultDirs } from './analyze.mjs';
+import { promptTokens, computeM2, computeM3, computeComparison, computeScaling, computeOverhead, withoutProbes, resultDirs } from './analyze.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -87,4 +87,27 @@ test('a scaling path is a result directory or a root of result directories', () 
   assert.deepEqual(resultDirs(`${join(root, 'grid')},${join(root, 'scaling')}`), [
     join(root, 'grid'), join(root, 'scaling', 'n0'), join(root, 'scaling', 'n10'),
   ]);
+});
+
+const probe = (condition, steps, extraResources = 0) => ({
+  ...run(condition, steps.reduce((a, b) => a + b, 0), { extraResources, taskId: 'P0' }),
+  usage: { promptTokens: steps.reduce((a, b) => a + b, 0), stepPromptTokens: steps },
+});
+
+test('overhead is the first step prompt of the probe, per size and condition', () => {
+  const rows = computeOverhead([
+    probe('B', [3000]), probe('B', [3200]),
+    probe('A', [1000, 1400]),
+    probe('B', [9000], 10),
+    run('A', 50000),
+  ]);
+
+  assert.deepEqual(rows, [
+    { agent: 'openrouter/openai/gpt-6-luna', extraResources: 0, operations: 19, A: 1000, B: 3100 },
+    { agent: 'openrouter/openai/gpt-6-luna', extraResources: 10, operations: 69, A: '', B: 9000 },
+  ]);
+});
+
+test('probe runs stay out of the task metrics', () => {
+  assert.deepEqual(withoutProbes([run('A', 1), probe('A', [1])]).map(r => r.taskId), ['T2.1']);
 });

@@ -131,9 +131,11 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
  */
 export function sumUsage(events) {
   let input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0;
+  const stepPromptTokens = [];
   for (const ev of events) {
     if (ev.type === 'step_finish' && ev.part?.tokens) {
       const t = ev.part.tokens;
+      stepPromptTokens.push((t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0));
       input += t.input || 0;
       output += t.output || 0;
       reasoning += t.reasoning || 0;
@@ -152,5 +154,7 @@ export function sumUsage(events) {
     cacheReadTokens: cacheRead,
     cacheCreationTokens: cacheWrite,
     promptTokens: input + cacheRead + cacheWrite,
+    // The first step's prompt is the system prompt, the tool definitions and the user message: the probe measures it.
+    stepPromptTokens,
   };
 }

@@ -11,6 +11,7 @@
  *   node eval/run.mjs --model=github-copilot/gpt-5-mini           # Single model
  *   node eval/run.mjs --task T1.1              # Single task
  *   node eval/run.mjs --tier 1                 # Single tier
+ *   node eval/run.mjs --probe                  # Tool schema overhead probe (M6), not a task
  *   node eval/run.mjs --runs 5                 # k=5 repetitions
  *   node eval/run.mjs --timeout 180000         # 3min timeout per task
  *   node eval/run.mjs --condition B            # OpenAPI static condition
@@ -23,7 +24,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-import { TASKS } from './tasks.mjs';
+import { TASKS, PROBE } from './tasks.mjs';
 import { evaluateGoal } from './grade.mjs';
 import { Guard } from './guard.mjs';
 import {
@@ -47,6 +48,7 @@ function parseArgs() {
     dryRun: false,
     skipReset: false,
     skipExisting: false,
+    probe: false,
     condition: 'A', // A = Hydra gateway (dynamic tools), B = OpenAPI static, C = Hydra gateway (static tools), G = Hydra gateway (groups)
   };
 
@@ -66,6 +68,7 @@ function parseArgs() {
       case '--dry-run': opts.dryRun = true; break;
       case '--skip-reset': opts.skipReset = true; break;
       case '--skip-existing': opts.skipExisting = true; break;
+      case '--probe': opts.probe = true; break;
       case '--condition': {
         const v = (val ?? args[++i])?.toUpperCase();
         if (!['A', 'B', 'C', 'G', 'GS'].includes(v)) {
@@ -324,7 +327,7 @@ async function main() {
   const systemPrompt = systemPromptFile ? readFileSync(systemPromptFile, 'utf-8') : '';
 
   // Filter tasks
-  let tasks = TASKS;
+  let tasks = opts.probe ? [PROBE] : TASKS;
   if (opts.task) tasks = tasks.filter(t => t.id === opts.task);
   if (opts.tier) tasks = tasks.filter(t => t.tier === opts.tier);
 

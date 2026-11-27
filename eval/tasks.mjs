@@ -326,3 +326,13 @@ export const TASKS = [
     },
   },
 ];
+
+// Not part of the grid: run with --probe. Its first step's prompt is the system prompt, the tool definitions and this
+// message, which is what eval/analyze.mjs --overhead reports as M6.
+export const PROBE = {
+  id: 'P0',
+  tier: 0,
+  prompt: 'Reply with the single word OK. Do not call any tool.',
+  negativeCapability: false,
+  goal: { type: 'response_regex', patterns: [String.raw`\bOK\b`] },
+};
