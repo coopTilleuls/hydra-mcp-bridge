@@ -38,6 +38,38 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Protocol: `EVAL_EXTRA_RESOURCES=N` adds N in-memory resources (5 operations each, never touched by the tasks; N=0 is byte-identical). gpt-6-luna, tasks T1.1 T1.3 T2.1 T2.4 T4.1, k=3, A and B.
 - Result, input tokens per run (A / B): N=0 (19 ops) 4320 / 2848, N=10 (69 ops) 4103 / 7024, N=40 (219 ops) 4596 / 22339, N=100 (519 ops) 5117 / 43676. Success stayed 15/15 in both conditions at every N. The crossover lies between 19 and 69 operations; at 519 operations B uses 8.5× the context of A.
 - Behaviour per condition (full A/B): Gemini deleted and recreated Hyperion to work around a read-only field only in A; luna refused to invent an Open Library ID only in A (3/3) and invented one in B (3/3); Gemini reported the OpenAPI server's abbreviated tool name "usrs" as a collection in B (3/3).
+- Superseded by the next entry: these token figures dropped cache writes.
+
+### Token usage dropped cache writes (2026-11-27)
+- Finding: the OpenCode adapter summed `input + cache.read` per step and ignored `cache.write`. A step whose prompt was written to the provider cache counted ~0 tokens, so the figures depended on cache luck (A T2.4 luna: 3022 counted, 29.6k sent). Only gpt-6-luna is affected (OpenAI reports cache writes); the deepseek and gemini figures are unchanged.
+- Kept: `promptTokens = input + cache.read + cache.write`, the context the model was sent (`sumUsage`, `eval/adapters/opencode.test.mjs`), and `eval/backfill-from-raw.mjs`, which recomputed every result from the raw OpenCode logs (507/507 matched, backup `~/hydra-eval-backup/pre-usage-backfill.tgz`). Commit 927e2af.
+- Corrected full A/B, luna, prompt tokens per run: A 21.2k, B 10.6k (2.0×, was 1.4×).
+- Corrected scaling (luna, 5 tasks, k=3), prompt tokens per run A / B: N=0 16.6k / 7.9k, N=10 17.2k / 15.6k, N=40 17.5k / 42.8k, N=100 18.9k / 81.4k. The crossover moves to between 69 and 219 operations; at 519 operations B uses 4.3× the context of A. A grows 14% from 19 to 519 operations, B ×10.
+
+## 2026-11 — Stateless discovery: MCP groups (condition G)
+
+### Why groups rather than condition C
+- MCP 2026-07-28 forbids a per-connection tool list, which is how A works. Condition C (`read_api_resource` + `invoke_api_operation`) is stateless but loses typed tools. The draft groups extension (`io.modelcontextprotocol/groups`, modelcontextprotocol/progressive-disclosure-wg#19) keeps typed tools and lazy loading: `tools/list` holds top-level tools, `groups/list` names groups, `groups/get` returns a group's tools, and each request declares the extension in `_meta`. C is kept as a fallback for clients that negotiate neither.
+
+### Gateway (commit 9916af2)
+- One group per Hydra class, `groups/get` returns the typed tools A would discover for that class (CRUD, link-bound, search), built from `docs.jsonld` with no per-client state. Scoped tools run by name without a prior `groups/get` (the SEP: discovery gating is not access control).
+- First cut grouped every documented class: API Platform also documents `Error` and `ConstraintViolation`, which A can never reach. Kept: only classes reachable from the entrypoint through `hydra:Link` properties.
+- Not covered: inline-only `hydra:operation` (they exist per resource, not per class) and search on sub-collections (the template is only in the sub-collection's response). `read_api_resource` still exposes both; no eval task uses them.
+
+### Client: OpenCode fork (soyuka/opencode, branch feat/mcp-groups on v1.19.6)
+- No released client speaks the extension. The fork adds `experimental.mcp_groups`: it declares the extension (initialize and per-request `_meta`), calls `groups/list`, exposes a client-side `load_group` tool listing the groups, and merges the tools `groups/get` returns. The per-step tool refresh of 1.19.6 picks them up within the same turn.
+- Parity, flag off: identical `initialize` on the wire (clientInfo, capabilities, protocol) and, on condition A (luna, the 5 scaling tasks, k=3), 15/15 with prompt tokens identical to stock to the token on T1.3, T2.4, T4.1. Run-to-run differences on T1.1/T2.1 are within stock's own variance.
+
+### Scaling result (luna, 5 tasks, k=3, prompt tokens per run)
+| N (operations) | A | B | G |
+|---|---|---|---|
+| 0 (19) | 16.6k | 7.9k | 17.0k |
+| 10 (69) | 17.2k | 15.6k | 18.4k |
+| 40 (219) | 17.5k | 42.8k | 21.9k |
+| 100 (519) | 18.9k | 81.4k | 28.9k |
+- Success 15/15 for G at every N (60/60).
+- G costs one more step than A (`load_group`) and grows +70% from 19 to 519 operations, against +14% for A and ×10 for B. The growth is the group list: the client lists every group in the `load_group` description, and the context is resent each step, on top of the entrypoint links A also reads. At 519 operations G uses 2.8× less than B, 1.5× more than A.
+- Open: a client that only lists groups on demand (a `list_groups` tool) or nested groups would bound that list; to measure before the full grid.
 
 ## 2026-11 — Binding dynamic tools to sub-resources
 
