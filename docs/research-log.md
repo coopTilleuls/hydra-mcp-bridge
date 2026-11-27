@@ -61,15 +61,22 @@ Each entry links to its evidence (commits, PRs, result archives).
 - Parity, flag off: identical `initialize` on the wire (clientInfo, capabilities, protocol) and, on condition A (luna, the 5 scaling tasks, k=3), 15/15 with prompt tokens identical to stock to the token on T1.3, T2.4, T4.1. Run-to-run differences on T1.1/T2.1 are within stock's own variance.
 
 ### Scaling result (luna, 5 tasks, k=3, prompt tokens per run)
-| N (operations) | A | B | G |
-|---|---|---|---|
-| 0 (19) | 16.6k | 7.9k | 17.0k |
-| 10 (69) | 17.2k | 15.6k | 18.4k |
-| 40 (219) | 17.5k | 42.8k | 21.9k |
-| 100 (519) | 18.9k | 81.4k | 28.9k |
+| N (operations) | A | B | G | GS |
+|---|---|---|---|---|
+| 0 (19) | 16.6k | 7.9k | 17.0k | 20.8k |
+| 10 (69) | 17.2k | 15.6k | 18.4k | 21.2k |
+| 40 (219) | 17.5k | 42.8k | 21.9k | 22.9k |
+| 100 (519) | 18.9k | 81.4k | 28.9k | 23.0k |
 - Success 15/15 for G at every N (60/60).
 - G costs one more step than A (`load_group`) and grows +70% from 19 to 519 operations, against +14% for A and ×10 for B. The growth is the group list: the client lists every group in the `load_group` description, and the context is resent each step, on top of the entrypoint links A also reads. At 519 operations G uses 2.8× less than B, 1.5× more than A.
-- Open: a client that only lists groups on demand (a `list_groups` tool) or nested groups would bound that list; to measure before the full grid.
+
+### Bounding the group list: client-side search (condition GS, 2026-11-27)
+- The SEP does not say how a client shows groups to the model, so G's growth is a client choice. Listing groups on demand (a `list_groups` tool) was rejected without a run: its result stays in the history and is resent each step, the same cost as the description.
+- Retained: `experimental.mcp_groups_catalog: "search"` in the fork. `load_group` takes a free name (no list, no enum) and a client-side `find_groups(query)` returns at most 10 groups from the `groups/list` result. The server and the condition G prompt are unchanged.
+- First matcher (every query word must match): rejected. luna phrases intents ("review create", "books create add book"), the verbs match no group description, so it searched 2–3 times per write task and N=0 reached 31.3k (T2.4 up to 94k). 36 runs archived in `var/eval/scaling-gs-and-matcher` on the eval server.
+- Kept: any word counts, ranked by hits then by group name, plural folded to singular. One search per run at most after that, often none (luna guesses `load_group(book)` from `/books`).
+- Result: 60/60. GS grows +11% from 19 to 519 operations, close to A (+14%), but starts 3.8k above G: the search is one more step and each step resends the context. G and GS cross near 220 operations; at 519, GS uses 3.5× less than B and 1.2× more than A.
+- Takeaway: groups scale like lazy discovery only when the client keeps the group catalog out of the prompt. Inline listing is cheaper for small APIs.
 
 ## 2026-11 — Binding dynamic tools to sub-resources
 
