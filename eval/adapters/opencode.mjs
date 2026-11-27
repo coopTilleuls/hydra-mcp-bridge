@@ -98,28 +98,7 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
         .map(ev => ev.part.text);
       response = textParts.join('\n');
 
-      // Sum token usage from step_finish events
-      let totalInput = 0, totalOutput = 0, totalReasoning = 0, totalCacheRead = 0;
-      for (const ev of events) {
-        if (ev.type === 'step_finish' && ev.part?.tokens) {
-          const t = ev.part.tokens;
-          totalInput += t.input || 0;
-          totalOutput += t.output || 0;
-          totalReasoning += t.reasoning || 0;
-          totalCacheRead += t.cache?.read || 0;
-        }
-      }
-      if (totalInput > 0 || totalOutput > 0) {
-        usage = {
-          inputTokens: totalInput,
-          // Includes reasoning, as in results written before reasoningTokens existed.
-          outputTokens: totalOutput + totalReasoning,
-          reasoningTokens: totalReasoning,
-          totalTokens: totalInput + totalOutput + totalReasoning,
-          cacheReadTokens: totalCacheRead,
-          cacheCreationTokens: 0,
-        };
-      }
+      usage = sumUsage(events);
 
       // Check for error events
       const errorEvent = events.find(ev => ev.type === 'error');
@@ -144,4 +123,34 @@ export function runTask(prompt, systemPrompt, { timeoutMs = 120_000, cwd, model 
       });
     });
   });
+}
+
+/**
+ * Token usage summed over the steps of a run. A step's prompt is its uncached input plus the cached prefix it read
+ * plus the part it wrote to the cache: promptTokens is the context the model was sent, whatever the cache did.
+ */
+export function sumUsage(events) {
+  let input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0;
+  for (const ev of events) {
+    if (ev.type === 'step_finish' && ev.part?.tokens) {
+      const t = ev.part.tokens;
+      input += t.input || 0;
+      output += t.output || 0;
+      reasoning += t.reasoning || 0;
+      cacheRead += t.cache?.read || 0;
+      cacheWrite += t.cache?.write || 0;
+    }
+  }
+  if (input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) return null;
+
+  return {
+    inputTokens: input,
+    // Includes reasoning, as in results written before reasoningTokens existed.
+    outputTokens: output + reasoning,
+    reasoningTokens: reasoning,
+    totalTokens: input + output + reasoning,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheWrite,
+    promptTokens: input + cacheRead + cacheWrite,
+  };
 }

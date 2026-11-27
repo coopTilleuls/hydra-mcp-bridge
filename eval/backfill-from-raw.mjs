@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * Adds `clientToolCalls` to eval results that predate the field, from the raw OpenCode event logs.
+ * Rewrites `clientToolCalls` and `usage` of eval results from the raw OpenCode event logs, for results written
+ * before those fields existed or were complete (cache writes were missing from usage).
  *
- * Usage: node eval/backfill-tool-calls.mjs <results-dir> <raw-dir>
+ * Usage: node eval/backfill-from-raw.mjs <results-dir> <raw-dir>
  *
  * Each result is matched to the raw *.jsonl file containing its `sessionId`.
  */
@@ -11,7 +12,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { extractClientToolCalls, parseEvents } from './adapters/opencode.mjs';
+import { extractClientToolCalls, parseEvents, sumUsage } from './adapters/opencode.mjs';
 
 const NON_RESULT_FILES = new Set(['summary.json', 'judgments.json']);
 
@@ -30,7 +31,7 @@ function main() {
   const resultsDir = resultsArg && resolve(resultsArg);
   const rawDir = rawArg && resolve(rawArg);
   if (!resultsDir || !rawDir || !existsSync(resultsDir) || !existsSync(rawDir)) {
-    console.error('Usage: node eval/backfill-tool-calls.mjs <results-dir> <raw-dir>');
+    console.error('Usage: node eval/backfill-from-raw.mjs <results-dir> <raw-dir>');
     process.exit(1);
   }
 
@@ -46,6 +47,7 @@ function main() {
       continue;
     }
     result.clientToolCalls = extractClientToolCalls(events);
+    result.usage = sumUsage(events);
     writeFileSync(path, JSON.stringify(result, null, 2));
     matched++;
   }

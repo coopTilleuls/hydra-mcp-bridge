@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { extractClientToolCalls, parseEvents } from './opencode.mjs';
+import { extractClientToolCalls, parseEvents, sumUsage } from './opencode.mjs';
 
 const toolUse = (tool, state) => ({ type: 'tool_use', sessionID: 'ses_1', part: { type: 'tool', tool, callID: 'c', state } });
 
@@ -35,4 +35,18 @@ test('ignores non-tool events and non-JSON lines', () => {
   ].join('\n'));
 
   assert.deepEqual(extractClientToolCalls(events).map(c => c.tool), ['get_book']);
+});
+
+test('counts cache writes in the prompt tokens of each step', () => {
+  const step = (input, output, reasoning, write, read) => ({ type: 'step_finish', part: { tokens: { input, output, reasoning, cache: { write, read } } } });
+
+  assert.deepEqual(sumUsage([step(3, 21, 0, 1462, 0), step(3, 22, 0, 83, 1462), { type: 'text' }]), {
+    inputTokens: 6,
+    outputTokens: 43,
+    reasoningTokens: 0,
+    totalTokens: 49,
+    cacheReadTokens: 1462,
+    cacheCreationTokens: 1545,
+    promptTokens: 3013,
+  });
 });
