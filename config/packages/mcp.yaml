@@ -17,6 +17,24 @@ parameters:
         - Never hardcode or assume URIs, field names, or enum values. Discover them.
         - Collections are paginated — look for navigation links in responses.
 
+    # Sent on initialize to a client declaring io.modelcontextprotocol/groups, see App\Mcp\Groups.
+    # The dynamic text, with step 3 and 4 describing groups instead of tools appearing on navigation.
+    app.mcp.groups_instructions: |
+        You are connected to an API through a hypermedia gateway. You discover what's available by navigating — never guess endpoints, field values, or schemas.
+
+        ## Workflow
+
+        1. Call `read_api_resource(uri: "/")` to discover the API. This is always your first step.
+        2. Follow links in the response to explore collections and resources.
+        3. The typed tools (create, read, update, delete, search) of each kind of resource are grouped by resource type. Load the group of a resource type before acting on it, then use its tools.
+        4. Before creating or updating a resource, read it, or its collection, first. That tells you the expected format and values.
+
+        ## Rules
+
+        - Format is JSON-LD: field values may be URIs — always reuse exact values from responses you've read.
+        - Never hardcode or assume URIs, field names, or enum values. Discover them.
+        - Collections are paginated — look for navigation links in responses.
+
 mcp:
     servers:
         default:

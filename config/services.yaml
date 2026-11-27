@@ -56,7 +56,6 @@ services:
 
     App\Mcp\Handler\DynamicToolRequestHandler:
         arguments:
-            $hydraClient: '@hydra.client'
             $logger: '@logger'
 
     App\Eval\McpEvalLogger:

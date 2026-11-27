@@ -178,15 +178,18 @@ final class RestoringRegistryDecorator implements RegistryInterface, ResetInterf
 
     private function isVisible(string $name): bool
     {
+        $dynamic = $this->inner->hasTool($name) && DynamicToolRegistry::HANDLER === $this->inner->getTool($name)->handler;
+
         return match ($this->modeResolver->current()) {
-            DiscoveryMode::Static => !$this->inner->hasTool($name) || DynamicToolRegistry::HANDLER !== $this->inner->getTool($name)->handler,
+            DiscoveryMode::Static => !$dynamic,
             DiscoveryMode::Dynamic => InvokeApiOperation::TOOL_NAME !== $name,
+            DiscoveryMode::Groups => !$dynamic && InvokeApiOperation::TOOL_NAME !== $name,
         };
     }
 
     private function restoreIfNeeded(): void
     {
-        if ($this->restored || DiscoveryMode::Static === $this->modeResolver->current()) {
+        if ($this->restored || DiscoveryMode::Dynamic !== $this->modeResolver->current()) {
             return;
         }
         $this->restored = true;

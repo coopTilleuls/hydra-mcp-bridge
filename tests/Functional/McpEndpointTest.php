@@ -74,6 +74,8 @@ class McpEndpointTest extends WebTestCase
      */
     private array $lastSseMessages = [];
 
+    private array $lastInitializeResult = [];
+
     private function parseLastSseResponse(string $body, int $expectedId): array
     {
         $this->lastSseMessages = $this->parseSseEvents($body);
@@ -125,7 +127,7 @@ class McpEndpointTest extends WebTestCase
     /**
      * Initialize an MCP session and return the session ID.
      */
-    private function initializeSession(): string
+    private function initializeSession(array $capabilities = []): string
     {
         $headers = ['CONTENT_TYPE' => 'application/json'];
 
@@ -135,7 +137,7 @@ class McpEndpointTest extends WebTestCase
             'method' => 'initialize',
             'params' => [
                 'protocolVersion' => '2025-06-18',
-                'capabilities' => new \stdClass(),
+                'capabilities' => (object) $capabilities,
                 'clientInfo' => ['name' => 'phpunit-test', 'version' => '1.0'],
             ],
         ]));
@@ -147,6 +149,7 @@ class McpEndpointTest extends WebTestCase
         $this->assertNotEmpty($sessionId);
 
         $body = json_decode($response->getContent(), true);
+        $this->lastInitializeResult = $body['result'] ?? [];
         $this->assertArrayHasKey('result', $body, 'Initialize must return a result');
         $this->assertArrayHasKey('serverInfo', $body['result'], 'Initialize result must contain serverInfo');
 
@@ -206,11 +209,11 @@ class McpEndpointTest extends WebTestCase
         return implode("\n", $texts);
     }
 
-    private function statelessRpc(int $id, string $method, array $params = []): array
+    private function statelessRpc(int $id, string $method, array $params = [], array $capabilities = []): array
     {
         $params['_meta'] = [
             'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
-            'io.modelcontextprotocol/clientCapabilities' => new \stdClass(),
+            'io.modelcontextprotocol/clientCapabilities' => (object) $capabilities,
             'io.modelcontextprotocol/clientInfo' => ['name' => 'phpunit-test', 'version' => '1.0'],
         ];
 
@@ -855,6 +858,121 @@ class McpEndpointTest extends WebTestCase
                 ],
             ],
         ];
+    }
+
+    private const array GROUPS = ['extensions' => ['io.modelcontextprotocol/groups' => []]];
+
+    private function initializeGroupsSession(): string
+    {
+        return $this->initializeSession(['extensions' => ['io.modelcontextprotocol/groups' => new \stdClass()]]);
+    }
+
+    public function testGroupsExtensionIsAdvertised(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+
+        $this->initializeGroupsSession();
+
+        $this->assertArrayHasKey('io.modelcontextprotocol/groups', $this->lastInitializeResult['capabilities']['extensions'] ?? []);
+    }
+
+    public function testGroupsListHasOneGroupPerClass(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeGroupsSession();
+        $groups = $this->jsonRpc($sid, 1, 'groups/list', ['_meta' => ['io.modelcontextprotocol/clientCapabilities' => self::GROUPS]]);
+
+        $this->assertArrayHasKey('result', $groups, json_encode($groups));
+        $this->assertSame(['book', 'review'], array_column($groups['result']['groups'], 'name'));
+        foreach ($groups['result']['groups'] as $group) {
+            $this->assertNotSame('', $group['description']);
+            $this->assertArrayNotHasKey('tools', $group, 'A list entry never carries its contents');
+        }
+    }
+
+    public function testGroupsToolListOnlyHoldsTheReadTool(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeGroupsSession();
+        $this->assertSame(['read_api_resource'], array_keys($this->getToolsByName($sid, 1)));
+
+        $this->discoverTools($sid, '/books');
+        $this->assertSame(['read_api_resource'], array_keys($this->getToolsByName($sid, 2)), 'Scoped tools never reach tools/list');
+        $this->assertSame([], array_filter($this->lastSseMessages, static fn (array $message): bool => 'notifications/tools/list_changed' === ($message['method'] ?? null)));
+    }
+
+    public function testGroupGetReturnsTheTypedToolsOfTheClass(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeGroupsSession();
+        $book = $this->jsonRpc($sid, 1, 'groups/get', ['name' => 'book']);
+        $review = $this->jsonRpc($sid, 2, 'groups/get', ['name' => 'review']);
+
+        $this->assertArrayHasKey('result', $book, json_encode($book));
+        $bookTools = array_column($book['result']['tools'], null, 'name');
+        $this->assertEqualsCanonicalizing(
+            ['get_book_collection', 'post_book', 'get_book', 'patch_book', 'delete_book', 'get_review_collection', 'create_review', 'search_books'],
+            array_keys($bookTools),
+        );
+        $this->assertArrayNotHasKey('uri', $bookTools['post_book']['inputSchema']['properties'], 'An entrypoint link targets its fixed collection');
+        $this->assertContains('uri', $bookTools['patch_book']['inputSchema']['required']);
+
+        $reviewTools = array_column($review['result']['tools'], null, 'name');
+        $this->assertEqualsCanonicalizing(['get_review', 'delete_review', 'get_review_collection', 'create_review'], array_keys($reviewTools));
+        $this->assertSame($bookTools['create_review'], $reviewTools['create_review'], 'A tool in several groups has one definition');
+    }
+
+    public function testUnknownGroupIsNotFound(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeGroupsSession();
+        $response = $this->jsonRpc($sid, 1, 'groups/get', ['name' => 'author']);
+
+        $this->assertSame(-32002, $response['error']['code'] ?? null, json_encode($response));
+    }
+
+    public function testScopedToolRunsWithoutLoadingItsGroup(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+        $this->browser->disableReboot();
+
+        $sid = $this->initializeGroupsSession();
+        $this->jsonRpc($sid, 1, 'tools/call', ['name' => 'post_book', 'arguments' => ['title' => 'Ilium']]);
+        $created = $this->jsonRpc($sid, 2, 'tools/call', ['name' => 'create_review', 'arguments' => ['book' => '/books/dune', 'body' => 'Spice', 'rating' => 5]]);
+        $this->assertArrayNotHasKey('error', $created, json_encode($created));
+        $this->jsonRpc($sid, 3, 'tools/call', ['name' => 'search_books', 'arguments' => ['title' => 'Dune']]);
+
+        $writes = array_map(static fn (array $call): array => \array_slice($call, 0, 2), array_values(array_filter($calls, static fn (array $call): bool => 'GET' !== $call[0])));
+        $this->assertSame([['POST', 'https://localhost/books'], ['POST', 'https://localhost/books/dune/reviews']], $writes);
+        $this->assertSame(['GET', 'https://localhost/books?title=Dune'], \array_slice(end($calls), 0, 2));
+    }
+
+    public function testStatelessRequestDeclaringGroupsGetsTheGroupedView(): void
+    {
+        $calls = [];
+        static::getContainer()->set('hydra.client', $this->bookReviewsUpstream($calls));
+
+        $tools = $this->statelessRpc(1, 'tools/list', [], self::GROUPS);
+        $this->assertSame(['read_api_resource'], array_column($tools['result']['tools'] ?? [], 'name'), json_encode($tools));
+
+        $groups = $this->statelessRpc(2, 'groups/list', [], self::GROUPS);
+        $this->assertSame(['book', 'review'], array_column($groups['result']['groups'] ?? [], 'name'), json_encode($groups));
+
+        $this->assertSame(['invoke_api_operation', 'read_api_resource'], $this->statelessToolNames(3), 'Without the extension the static view is unchanged');
     }
 
     public function testDynamicModeInitializeDescribesTypedTools(): void

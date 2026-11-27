@@ -58,6 +58,84 @@ final class HydraResponseParser
         return $links;
     }
 
+    /**
+     * The documented classes a client can reach by following links from the entrypoint, in documentation order.
+     * Classes only met as errors (hydra:Error, ConstraintViolation) are never reached.
+     *
+     * @param array<string, string> $entrypointLinks entrypoint link name => collection IRI
+     *
+     * @return list<array{id: string, title: string, description: ?string}>
+     */
+    public function reachableClasses(JsonLdDocument $docs, array $entrypointLinks): array
+    {
+        $docsNode = $docs->first();
+        if (null === $docsNode) {
+            return [];
+        }
+
+        $classMap = $this->buildClassMap($docsNode);
+        $pending = array_values(array_intersect_key($this->entrypointLinkClasses($docs), $entrypointLinks));
+        $reached = [];
+        while (null !== $classId = array_shift($pending)) {
+            $class = $this->resolveClass($classId, $classMap);
+            $id = $class?->nodeId();
+            if (null === $class || null === $id || isset($reached[$id])) {
+                continue;
+            }
+
+            $reached[$id] = true;
+            foreach ($class->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
+                $property = $supportedProp->first(Vocab::PROPERTY);
+                if (null !== $property && \in_array(Vocab::LINK, $property->types(), true) && null !== $target = $this->resolveTargetClass($property)) {
+                    $pending[] = $target;
+                }
+            }
+        }
+
+        $classes = [];
+        foreach ($classMap as $id => $class) {
+            if (isset($reached[$id])) {
+                $classes[] = ['id' => $id, 'title' => $class->value(Vocab::TITLE) ?? $this->localName($id), 'description' => $class->value(Vocab::DESCRIPTION)];
+            }
+        }
+
+        return $classes;
+    }
+
+    /**
+     * @return array<string, string> entrypoint link name => @id of the class its collection holds
+     */
+    public function entrypointLinkClasses(JsonLdDocument $docs): array
+    {
+        $docsNode = $docs->first();
+        if (null === $docsNode) {
+            return [];
+        }
+
+        $links = [];
+        foreach ($this->buildClassMap($docsNode) as $id => $class) {
+            if ('Entrypoint' !== $this->localName($id) && 'Entrypoint' !== $class->value(Vocab::TITLE)) {
+                continue;
+            }
+
+            foreach ($class->all(Vocab::SUPPORTED_PROPERTY_PROP) as $supportedProp) {
+                $property = $supportedProp->first(Vocab::PROPERTY);
+                $name = $property?->value(Vocab::LABEL) ?? $this->fragmentName($property?->nodeId());
+                $classId = null !== $property ? $this->resolveTargetClass($property) : null;
+                if (null !== $name && null !== $classId) {
+                    $links[$name] = $classId;
+                }
+            }
+        }
+
+        return $links;
+    }
+
+    public function isSameClass(string $classId, string $otherClassId): bool
+    {
+        return $classId === $otherClassId || $this->localName($classId) === $this->localName($otherClassId);
+    }
+
     public function entrypointIri(JsonLdDocument $docs): ?string
     {
         return $docs->first()?->id(Vocab::ENTRYPOINT);

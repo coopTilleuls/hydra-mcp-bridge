@@ -11,4 +11,7 @@ enum DiscoveryMode: string
 
     /** A fixed tool list: reads describe the available operations, a second tool invokes them by URI. */
     case Static = 'static';
+
+    /** read_api_resource alone in tools/list, the typed tools of each class served as groups (io.modelcontextprotocol/groups). */
+    case Groups = 'groups';
 }

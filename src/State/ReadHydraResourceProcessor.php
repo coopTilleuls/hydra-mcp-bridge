@@ -44,7 +44,8 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
         $uri = $data->uri;
         $this->logger->info('Navigating to Hydra resource', ['uri' => $uri]);
 
-        if (DiscoveryMode::Static === $this->modeResolver->forSession($session)) {
+        $mode = $this->modeResolver->current();
+        if (DiscoveryMode::Static === $mode) {
             return $this->describe($uri);
         }
 
@@ -67,6 +68,10 @@ final class ReadHydraResourceProcessor implements ProcessorInterface
         } catch (\Throwable $e) {
             $this->logger->warning('JSON-LD expansion failed, skipping affordance discovery', ['uri' => $uri, 'error' => $e->getMessage()]);
             $expanded = new JsonLdDocument([]);
+        }
+
+        if (DiscoveryMode::Groups === $mode) {
+            return new CallToolResult([new TextContent($content)]);
         }
 
         $affordances = [];
