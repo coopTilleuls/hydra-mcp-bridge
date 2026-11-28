@@ -12,7 +12,7 @@ Open work after the groups scaling (2026-11-27). Results live on the eval server
 
 ## Analysis
 
-- M3 client-side tool errors, checked 2026-11-27. deepseek A 13.9% vs B 4.5% is mostly T3.4: anonymous `POST /bookmarks` fails by design (500, `user_id` null) and deepseek A retried it 24 times against 3 under B. Without T3.4: deepseek A 6.4% vs B 3.0%, gemini 8.7% vs 7.8%, luna 1.7% vs 1.9%. gemini A's largest cluster (16 calls, T4.3) passes `/books/x/reviews` to `get_review_collection` instead of the book IRI; the gateway error ("has no \"reviews\" link") is accurate but does not say what to pass. Improving that message changes condition A, so not before the G/GS grid is done. Report M3 with and without T3.4.
+- M3 client-side tool errors, checked 2026-11-27. deepseek A 13.9% vs B 4.5% is mostly T3.4: anonymous `POST /bookmarks` fails by design (500, `user_id` null) and deepseek A retried it 24 times against 3 under B. Without T3.4: deepseek A 6.4% vs B 3.0%, gemini 8.7% vs 7.8%, luna 1.7% vs 1.9%. gemini A's largest cluster (16 calls, T4.3) passes `/books/x/reviews` to `get_review_collection` instead of the book IRI; the gateway error ("has no \"reviews\" link") is accurate but does not say what to pass. Report M3 with and without T3.4. Improving that message is gateway work outside the paper: do it after the paper's baseline is tagged, no eval rerun needed.
 - Condition C: at most a cheap luna scaling check, only as the fallback for clients that negotiate neither dynamic tools nor groups.
 
 ## Infrastructure
