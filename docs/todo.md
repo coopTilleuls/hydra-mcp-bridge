@@ -4,7 +4,7 @@ Open work after the groups scaling (2026-11-27). Results live on the eval server
 
 ## Next
 
-1. Done 2026-11-28: G/GS full grid, judge on all conditions, scaling on the 3 models, measured M6 (research log). Open from it: capture luna's G probe request (overhead plateaus at 1608/2271), and let `find_groups` list the catalog on an empty query (deepseek fishes with "a", "*"), rerunning GS only.
+1. Done 2026-11-28: G/GS full grid, judge on all conditions, scaling on the 3 models, measured M6 (research log). The luna G plateau was a stale `cache.app` (fixed in the server scripts, luna G/GS scaling and the probes rerun 2026-11-28). Open: let `find_groups` list the catalog on an empty query (deepseek fishes with "a", "*"), then rerun GS everywhere.
 2. Track the server setup in the repo: `oc-isolated.sh` (parametrized by `EVAL_OC_IMAGE`), `runner/` and `runner-groups/` Dockerfiles, `scaling-*.sh`, `parity-then-g.sh`, `env.sh`. Reproducing a run currently depends on files only present on the server.
 3. Report the inline vs search numbers on the groups SEP (modelcontextprotocol/progressive-disclosure-wg#19): the draft does not say how a client presents groups, and that choice decides whether groups scale.
 4. Judge agreement sample (judge vs keyword vs manual on a subset).

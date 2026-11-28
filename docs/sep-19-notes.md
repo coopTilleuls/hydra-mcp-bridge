@@ -28,18 +28,19 @@ Mean prompt tokens per task, 19 → 519 operations (scaling tasks):
 
 | model | flat | inline | search |
 |---|---|---|---|
-| luna | 7.9k → 81.4k | rerun pending | rerun pending |
+| luna | 7.9k → 81.4k | 17.7k → 26.2k | 23.2k → 26.6k |
 | gemini | 11.7k → 154.9k | 23.2k → 33.4k | 37.0k → 35.0k |
 | deepseek | 10.3k → 154.0k | 28.1k → 33.7k | 29.8k → 37.6k |
 
 - Flat grows 10–15×, groups stay under 1.7×. Flat loses between 69 and 219 operations.
 - At 19 operations flat is cheapest (agrees with helloeve).
 - Pass rates on the full grid (/57, judge applied): luna flat 54, inline 57, search 56; gemini 51 / 54 / 52; deepseek 54 / 54 / 49. Groups do not cost success.
-- First-step prompt (tool definitions): inline grows with the API (gemini 4.4k → 6.2k, deepseek 2.9k → 4.7k), search stays flat.
+- First-step prompt (tool definitions): inline grows with the API (luna 1.6k → 3.3k, gemini 4.4k → 6.2k, deepseek 2.9k → 4.7k), search stays flat.
+- Inline stays at or under search on every model up to 519 operations (luna converges, 26.2k vs 26.6k). Differences under ~15% are noise at k=3.
 
 ## Points for the spec
 
-1. Client presentation decides most of the cost. Inline grows with the catalog, search does not, but inline stayed cheaper overall up to 519 operations on gemini and deepseek. Neither is a clear default.
+1. Client presentation decides most of the cost. Inline grows with the catalog, search does not, but inline stayed cheaper overall up to 519 operations on all three models, converging on luna. Search pays one extra step, inline pays a growing prompt: where they cross depends on the model and lies beyond 519 operations here.
 2. Search alone needs a way to enumerate. deepseek called `find_groups("a")`, `find_groups("*")` on T3.4 when it could not name the group, 584k–905k tokens per run. A client offering search should also be able to list (a SHOULD on the client side?).
 
 Method and raw results: `docs/research-log.md`.
