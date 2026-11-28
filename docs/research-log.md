@@ -76,7 +76,36 @@ Each entry links to its evidence (commits, PRs, result archives).
 - First matcher (every query word must match): rejected. luna phrases intents ("review create", "books create add book"), the verbs match no group description, so it searched 2–3 times per write task and N=0 reached 31.3k (T2.4 up to 94k). 36 runs archived in `var/eval/scaling-gs-and-matcher` on the eval server.
 - Kept: any word counts, ranked by hits then by group name, plural folded to singular. One search per run at most after that, often none (luna guesses `load_group(book)` from `/books`).
 - Result: 60/60. GS grows +11% from 19 to 519 operations, close to A (+14%), but starts 3.8k above G: the search is one more step and each step resends the context. G and GS cross near 220 operations; at 519, GS uses 3.5× less than B and 1.2× more than A.
-- Takeaway: groups scale like lazy discovery only when the client keeps the group catalog out of the prompt. Inline listing is cheaper for small APIs.
+- Takeaway: groups scale like lazy discovery only when the client keeps the group catalog out of the prompt. Inline listing is cheaper for small APIs. Revised below: the crossover is luna-only, gemini and deepseek keep G at or under GS up to 519 operations.
+
+### Full grid and scaling on three models (2026-11-28)
+- Grid: G and GS on the 19 tasks, k=3, the 3 models, N=0 (`grid-g.sh` on the eval server), next to the A/B grid in `var/eval/results`. Judged with `eval/judge.mjs` (sonnet) on the 5 negative-capability tasks for all four conditions at once: 180 runs, `var/eval/results/judgments.json`. Pass (judge applied) and mean prompt tokens per run:
+
+| Model | A | B | G | GS |
+|---|---|---|---|---|
+| luna | 57/57, 21.2k | 54/57, 10.6k | 57/57, 22.6k | 56/57, 29.7k |
+| gemini | 51/57, 154.9k | 51/57, 71.9k | 54/57, 136.4k | 52/57, 128.3k |
+| deepseek | 51/57, 71.5k | 54/57, 22.5k | 54/57, 45.6k | 49/57, 87.0k |
+
+- The keyword grader agrees with the judge on 126/180 runs only, wrong both ways and in every condition: it passed gemini and deepseek runs that guessed Open Library IDs and created the book on T2.5, and failed correct refusals phrased "no way to", "couldn't create", "exposes no ... operation". Three judge FAILs read by hand were right. Pass rates on these tasks use the judge; the March A/B numbers move with it (luna A 53→57, gemini B 45→51).
+- Client errors (M3): deepseek A 13.9% vs B 4.5% is mostly T3.4, the anonymous `POST /bookmarks` that fails by design (500): A retried it 24 times, B 3. Without T3.4, 6.4% vs 3.0%.
+- deepseek GS's 87.0k comes from T3.4 (584k–905k per run, 30–42 calls, against B's 21k–35k): after the failing post it looks for every group with `find_groups("a")`, `find_groups("*")`, then "auth", "login". Search mode has no way to list the catalog, so a model that wants an overview guesses queries. Without T3.4, A 45k, B 22k, G 42k, GS 51k.
+- Scaling: A, B, G, GS on gemini and deepseek at N=10, 40, 100 (`scaling-all.sh`, 360 runs, $1.60 measured on the OpenRouter key), N=0 from the grid. Mean prompt tokens per run, 19 → 519 operations:
+
+| Model | A | B | G | GS |
+|---|---|---|---|---|
+| deepseek | 25.4k → 28.5k | 10.3k → 154.0k | 28.1k → 33.7k | 29.8k → 37.6k |
+| gemini | 33.2k → 33.4k | 11.7k → 154.9k | 23.2k → 33.4k | 37.0k → 35.0k |
+| luna | 16.6k → 18.9k | 7.9k → 81.4k | 17.0k → 28.9k | 20.2k → 23.0k |
+
+- B grows 10–15× on every model, A, G and GS stay within 1.0–1.7×; at 519 operations B costs 4–5× the gateway conditions. B's cost passes A's between 69 and 219 operations on all three models.
+- The G/GS crossover does not generalize: luna crosses near 220 operations, gemini and deepseek keep G at or under GS up to 519 (G grows +44% and +20%, slower than luna's +70%). The search step costs more than the inline list across the whole range we measured for those two.
+- gemini on T4.1 at N=10 under A answered "0.25" in 3/3 runs after one `read_api_resource("/")`; the gateway output is the clean 14-link entrypoint (checked by hand), and B, G, GS passed or listed all but one collection. Not reproduced at N=40 or N=100. Kept as a model failure.
+
+### Tool schema overhead, measured (M6, 2026-11-28)
+- The M6 estimate (19 tools at 1685 tokens, 80 per Hydra tool) was wrong for any scaled run. Replaced by a probe (`run.mjs --probe`, task P0, "Reply with the single word OK. Do not call any tool."): the first step's prompt is the system prompt, the tool definitions and that message, counted by the model's tokenizer. The adapter now records each step's prompt (`usage.stepPromptTokens`). `analyze.mjs --overhead var/eval/overhead` (gateway 08ca095).
+- First-step prompt tokens, 19 → 519 operations: A and GS do not move (A 1.5k/4.2k/2.7k, GS 1.6k/4.4k/2.9k for luna/gemini/deepseek); B 1.9k → 36.1k (luna), 5.4k → 69.5k (gemini), 4.6k → 76.5k (deepseek); G 4.4k → 6.2k (gemini), 2.9k → 4.7k (deepseek).
+- Unresolved: luna's G reads 1608 at 19 and 69 operations and 2271 at 219 and 519, exact values, while gemini and deepseek grow at every size. The fork sends the same full list and enum to every model (it follows `groups/list` pagination), so the plateau is downstream (OpenRouter or OpenAI). To capture the sent request before using luna's G overhead.
 
 ## 2026-11 — Binding dynamic tools to sub-resources
 
