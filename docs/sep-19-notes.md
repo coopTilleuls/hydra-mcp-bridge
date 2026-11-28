@@ -9,6 +9,11 @@ Raw material for a comment written by hand. The modelcontextprotocol org require
 - abcreativ (11-16), 521 tools: upfront capability text helped more than grouping.
 - No sponsor yet. Beta needs an Extensions Track SEP and a reference implementation in an official SDK (php-sdk is one). Stable needs one client and one server interoperating: the gateway and the OpenCode fork are that pair.
 
+- #20 (helloeve, open, no measurements committed): TypeScript helper `@modelcontextprotocol/ext-grouping` over `@modelcontextprotocol/sdk` 1.27.x, flat `groups/get` shape, drops `ttlMs`/`cacheScope` (not in the base SDK). Clients: `groups-agent` (Claude, `list_groups` + `get_group` tools) and `groups-mod` (Claude Code plugin, group list injected in the prompt, `open_group`). Both are our inline presentation; no search variant anywhere. chughtapan's 4 review threads (membership, Identity, caching) unanswered.
+- Other implementations: panyam/mcpkit (Go). #11 uses the older id `io.modelcontextprotocol/grouping`. #18 (Apify, 70k+ tools) asks for `tools/resolve`, no data.
+- Ours matches #19: id `io.modelcontextprotocol/groups`, plural methods, flat result, `ttlMs`/`cacheScope` kept. A PHP server and a third client (OpenCode, inline and search) next to #20's TypeScript ones.
+- Where to share: findings PR to `docs/experimental-findings.md` (CONTRIBUTING asks for reproducible detail, clients/servers tested, what worked/didn't/untested), a short #19 comment linking it, a line on Discord `#primitive-grouping-ig`.
+
 ## Setup
 
 - Gateway: one group per Hydra class, generated from docs.jsonld, no hand-written groups. OpenCode fork negotiating `io.modelcontextprotocol/groups`.
